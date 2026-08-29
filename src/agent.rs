@@ -36,6 +36,9 @@ pub struct SessionFile {
     /// Epoch milliseconds. The first of these three that is present dates the status.
     pub status_updated_at: Option<f64>,
     pub updated_at: Option<f64>,
+    /// Epoch milliseconds the session began. Dates the status as a last resort, **and** is a
+    /// column in its own right: without it a consumer cannot tell a session that just launched
+    /// from one that just finished a turn, because both read as `idle` with a small `age`.
     pub started_at: Option<f64>,
 }
 
@@ -75,6 +78,7 @@ impl SessionFile {
             name: self.name.clone().unwrap_or_else(|| NONE.into()),
             pid,
             session_id: self.session_id.clone().unwrap_or_else(|| NONE.into()),
+            started_at: epoch_secs(self.started_at),
             cwd: self.cwd.clone().unwrap_or_else(|| NONE.into()),
         })
     }
@@ -108,6 +112,24 @@ pub fn age_secs(now_secs: f64, status_set_at_ms: Option<f64>) -> u64 {
     }
 }
 
+/// Epoch **seconds** for a timestamp Claude Code writes in milliseconds.
+///
+/// ⚠️ An absent timestamp is `0`, on the same reasoning as [`age_secs`]: it renders as 1970,
+/// which reads as breakage rather than as data. It also fails in the safe direction for the one
+/// thing this column exists for — a consumer suppressing just-launched sessions computes an
+/// enormous session age, so it suppresses nothing rather than hiding a live agent.
+pub fn epoch_secs(ms: Option<f64>) -> u64 {
+    let Some(ms) = ms else {
+        return 0;
+    };
+    let secs = ms / 1000.0;
+    if secs.is_nan() || secs <= 0.0 {
+        0
+    } else {
+        secs as u64
+    }
+}
+
 /// One agent, as one output line.
 pub struct Row {
     pub status: String,
@@ -117,17 +139,25 @@ pub struct Row {
     pub name: String,
     pub pid: u32,
     pub session_id: String,
+    /// Epoch seconds, and deliberately absolute where `age` is a duration: it answers *when did
+    /// this session begin*, which does not go stale between this process reading it and a
+    /// consumer using it.
+    pub started_at: u64,
     pub cwd: String,
 }
 
 impl Row {
     /// 🔴 The column order is a published contract — a zellij plugin splits this into exactly
-    /// eight fields and reads them by position. `cwd` is last because it is the only field that
+    /// nine fields and reads them by position. `cwd` is last because it is the only field that
     /// can plausibly contain whitespace, so a consumer can take it as the whole remainder of
     /// the line instead of as a field with a terminator.
+    ///
+    /// ⚠️ `started_at` was added *before* `cwd` rather than after it, for that reason. That is a
+    /// breaking change to the contract: a consumer reading the old eight positions gets
+    /// `started_at` where it expects `cwd`.
     pub fn to_tsv(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.status,
             self.age,
             self.session,
@@ -135,6 +165,7 @@ impl Row {
             self.name,
             self.pid,
             self.session_id,
+            self.started_at,
             self.cwd
         )
     }
@@ -159,15 +190,16 @@ mod tests {
             name: "work-f8".into(),
             pid: 4242,
             session_id: "abc-123".into(),
+            started_at: 1_755_000_000,
             cwd: "/home/you/src".into(),
         }
     }
 
     #[test]
-    fn tsv_has_eight_fields_in_the_published_order() {
+    fn tsv_has_nine_fields_in_the_published_order() {
         let line = row().to_tsv();
         let fields: Vec<&str> = line.split('\t').collect();
-        assert_eq!(fields.len(), 8);
+        assert_eq!(fields.len(), 9);
         assert_eq!(
             fields,
             [
@@ -178,20 +210,54 @@ mod tests {
                 "work-f8",
                 "4242",
                 "abc-123",
+                "1755000000",
                 "/home/you/src"
             ]
         );
     }
 
     /// The reason cwd is last: it is the only field allowed to contain whitespace, and a
-    /// consumer must still see exactly eight fields.
+    /// consumer must still see exactly nine fields. This is also why `started_at` went in
+    /// before it rather than after.
     #[test]
     fn a_cwd_with_whitespace_stays_one_trailing_field() {
         let mut row = row();
         row.cwd = "/home/you/my projects/thing".into();
         let line = row.to_tsv();
-        assert_eq!(line.splitn(8, '\t').count(), 8);
+        assert_eq!(line.splitn(9, '\t').count(), 9);
         assert!(line.ends_with("\t/home/you/my projects/thing"));
+    }
+
+    /// 🔴 The whole reason this column exists: a session that just launched and one that just
+    /// finished a turn are both `idle` with a small `age`, and only `started_at` separates them.
+    #[test]
+    fn started_at_separates_a_newborn_from_a_finished_turn() {
+        let newborn: SessionFile =
+            serde_json::from_str(r#"{"startedAt":1755000000000,"statusUpdatedAt":1755000002000}"#)
+                .unwrap();
+        let finished: SessionFile =
+            serde_json::from_str(r#"{"startedAt":1754000000000,"statusUpdatedAt":1755000002000}"#)
+                .unwrap();
+
+        // Identical from `age` alone -- the column a consumer had before this one.
+        assert_eq!(
+            age_secs(1_755_000_012.0, newborn.status_set_at()),
+            age_secs(1_755_000_012.0, finished.status_set_at())
+        );
+
+        // Separable once the launch time is carried too.
+        assert_eq!(epoch_secs(newborn.started_at), 1_755_000_000);
+        assert_eq!(epoch_secs(finished.started_at), 1_754_000_000);
+    }
+
+    /// ⚠️ Same reasoning as an undated age: 1970 reads as breakage, and a consumer computing a
+    /// session age from it decides "not a newborn", which is the direction that shows an agent
+    /// rather than hides one.
+    #[test]
+    fn an_undated_start_is_zero_not_now() {
+        assert_eq!(epoch_secs(None), 0);
+        assert_eq!(epoch_secs(Some(-1.0)), 0);
+        assert_eq!(epoch_secs(Some(1_755_000_000_999.0)), 1_755_000_000);
     }
 
     #[test]

@@ -19,7 +19,7 @@ The two halves share one thing: the process id. `claude-agents` joins them.
 One agent per line, TAB-separated, in a fixed column order:
 
 ```
-status  age  session  pane  name  pid  session_id  cwd
+status  age  session  pane  name  pid  session_id  started_at  cwd
 ```
 
 | Column | Content |
@@ -31,16 +31,24 @@ status  age  session  pane  name  pid  session_id  cwd
 | `name` | Claude's own derived name, **not** the zellij session name |
 | `pid` | the process id, and the key the two halves are joined on |
 | `session_id` | Claude's session uuid, matching its transcript |
+| `started_at` | epoch **seconds** the session began, or `0` if unknown |
 | `cwd` | last, and the only field that may contain whitespace |
 
 ```console
 $ claude-agents
-waiting	35	work	0	work-f8	3318865	b08aacbc-…	/home/you/Projects/work
-idle	5238	notes	1	notes-e1	3132891	f8f9b7ea-…	/home/you/notes
-busy	13	-	-	scratch-2c	3129839	52b7681e-…	/home/you/scratch
+waiting	35	work	0	work-f8	3318865	b08aacbc-…	1755000000	/home/you/Projects/work
+idle	5238	notes	1	notes-e1	3132891	f8f9b7ea-…	1754913000	/home/you/notes
+busy	13	-	-	scratch-2c	3129839	52b7681e-…	1755004000	/home/you/scratch
 ```
 
 The third agent is not in zellij, so both join columns are `-`.
+
+### `age` and `started_at` are not the same question
+
+`age` is a duration in the current status; `started_at` is an absolute time the session began.
+A consumer needs both, because **a session that has just launched and one that has just
+finished a turn are both `idle` with a small `age`** — and a status bar that cannot tell them
+apart nags you about every tab you open. Only the launch time separates them.
 
 ## Four things it does deliberately
 
@@ -84,6 +92,15 @@ Reading a missing field as epoch-millisecond `0` is the obvious shortcut and it
 renders every row as roughly fifty-seven years old, which reads as data rather
 than as breakage. If Claude renames those fields, a column of `0s` is visibly
 wrong.
+
+## Compatibility
+
+⚠️ **`started_at` was added in a way that breaks the column contract, deliberately.** It sits
+**before** `cwd`, because `cwd` has to stay last — it is the only field that may contain
+whitespace, which is what lets a consumer take it as the whole remainder of the line.
+
+So a consumer written against the previous eight columns reads `started_at` where it expects
+`cwd`. Update consumers and this tool together.
 
 ## Consumers
 
