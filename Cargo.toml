@@ -1,0 +1,15 @@
+[package]
+name = "claude-agents"
+version = "0.1.0"
+edition = "2024"
+description = "One line per running Claude Code agent, joined to its zellij pane"
+license = "MIT"
+repository = "https://github.com/lorenzolfm/claude-agents"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
