@@ -30,7 +30,7 @@ One line per running Claude Code agent, joined to the zellij pane it runs in.
 
 Output is TAB-separated, one agent per line, in a fixed column order:
 
-    status  age  session  pane  name  pid  session_id  cwd
+    status  age  session  pane  name  pid  session_id  started_at  cwd
 
   status      whatever Claude reports, verbatim (busy, idle, waiting, shell, ...)
   age         whole seconds spent in that status
@@ -39,7 +39,12 @@ Output is TAB-separated, one agent per line, in a fixed column order:
   name        Claude's own derived name, NOT the zellij session name
   pid         the process id, and the key the two halves are joined on
   session_id  Claude's session uuid, matching its transcript
+  started_at  epoch seconds the session began, or 0 if unknown
   cwd         last, and the only field that may contain whitespace
+
+age and started_at answer different questions and a consumer needs both. A
+session that has just launched and one that has just finished a turn are both
+idle with a small age; only the launch time tells them apart.
 
 The status vocabulary is open and moves with Claude Code's version, so it is
 passed through untouched. Do not match it against a fixed set.
