@@ -1,4 +1,4 @@
-//! `claude-agents` — one line per running Claude Code agent, joined to its zellij pane.
+//! `claude-ps` — `ps` for Claude Code, joined to the zellij pane each agent runs in.
 //!
 //! Claude Code writes `~/.claude/sessions/<pid>.json` for each running agent, carrying what it
 //! is doing. That file says nothing about zellij. The agent's own environment says nothing
@@ -7,6 +7,7 @@
 
 mod agent;
 mod proc;
+mod transcript;
 
 use std::fs;
 use std::io::{self, Write};
@@ -16,31 +17,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 
-use agent::{Row, SessionFile};
+use agent::{Agent, SessionFile};
 
 /// Printed by `--help`, which the Python this replaces did not implement at all: it ignored
 /// `argv` entirely and printed the table whatever you asked it.
 #[derive(Parser)]
 #[command(
-    name = "claude-agents",
+    name = "claude-ps",
     version,
-    about = "One line per running Claude Code agent, joined to its zellij pane",
+    about = "ps for Claude Code, joined to the zellij pane each agent runs in",
     long_about = "\
-One line per running Claude Code agent, joined to the zellij pane it runs in.
+ps for Claude Code: every running agent, joined to the zellij pane it runs in.
 
-Output is TAB-separated, one agent per line, in a fixed column order:
-
-    status  age  session  pane  name  pid  session_id  started_at  cwd
+Output is a JSON array on stdout, one object per agent:
 
   status      whatever Claude reports, verbatim (busy, idle, waiting, shell, ...)
   age         whole seconds spent in that status
-  session     ZELLIJ_SESSION_NAME, or - if the agent is not in zellij
-  pane        ZELLIJ_PANE_ID, or - likewise
-  name        Claude's own derived name, NOT the zellij session name
+  context     {tokens, as_of} at the last assistant turn, or null
+  zellij      {session, pane}, or null when the agent is not inside zellij
+  name        Claude's own derived label, NOT the zellij session name
   pid         the process id, and the key the two halves are joined on
   session_id  Claude's session uuid, matching its transcript
   started_at  epoch seconds the session began, or 0 if unknown
-  cwd         last, and the only field that may contain whitespace
+  cwd         the agent's working directory
 
 age and started_at answer different questions and a consumer needs both. A
 session that has just launched and one that has just finished a turn are both
@@ -49,8 +48,15 @@ idle with a small age; only the launch time tells them apart.
 The status vocabulary is open and moves with Claude Code's version, so it is
 passed through untouched. Do not match it against a fixed set.
 
-Rows are sorted by session, then pane, then pid. That is for stable diffs
-between runs, not for display: ordering for a human belongs to the consumer.
+context is tokens only, never a percentage: the window size is not written to
+disk anywhere, so a denominator would have to come from a model-name table that
+goes confidently wrong the day a new model ships. It is also the one inexact
+join here -- the transcript path is derived from cwd -- so it is null rather
+than a guess when the file is not found.
+
+Agents are ordered by session, then pane, then pid, with those outside zellij
+last. That is for stable diffs between runs, not for display: ordering for a
+human belongs to the consumer.
 
 Agents whose session file is stale are omitted. Liveness is exact rather than
 heuristic -- the pid must be alive AND have started when the file says it did,
@@ -62,8 +68,8 @@ fn main() -> ExitCode {
     Cli::parse();
     match run() {
         Ok(output) => {
-            // Written in one call: a consumer polling this on a timer should see a whole table
-            // or nothing, never half of one.
+            // Written in one call: a consumer polling this on a timer should see a whole
+            // document or nothing, never half of one.
             if io::stdout().write_all(output.as_bytes()).is_err() {
                 // A closed pipe is what `| head` looks like from in here. Not an error.
                 return ExitCode::SUCCESS;
@@ -71,7 +77,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("claude-agents: {error}");
+            eprintln!("claude-ps: {error}");
             ExitCode::FAILURE
         }
     }
@@ -83,20 +89,25 @@ fn run() -> Result<String, String> {
         .map_err(|_| "the system clock is before the epoch".to_string())?
         .as_secs_f64();
 
-    let mut rows = collect(&sessions_dir()?, now_secs);
-    rows.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    let home = home()?;
+    let mut agents = collect(&sessions_dir(&home), now_secs, &home);
+    agents.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
 
-    let mut out = String::new();
-    for row in &rows {
-        out.push_str(&row.to_tsv());
-        out.push('\n');
-    }
+    // Pretty rather than compact, and that is a choice about diffing as much as about reading:
+    // one key per line means two runs a second apart differ in the lines that actually changed,
+    // which is what the sort order exists to make possible.
+    let mut out = serde_json::to_string_pretty(&agents)
+        .map_err(|error| format!("could not serialise the agent list: {error}"))?;
+    out.push('\n');
     Ok(out)
 }
 
-fn sessions_dir() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".claude").join("sessions"))
+fn home() -> Result<String, String> {
+    std::env::var("HOME").map_err(|_| "HOME is not set".to_string())
+}
+
+fn sessions_dir(home: &str) -> PathBuf {
+    PathBuf::from(home).join(".claude").join("sessions")
 }
 
 /// Every readable session file that still has a live agent behind it.
@@ -105,7 +116,7 @@ fn sessions_dir() -> Result<PathBuf, String> {
 /// directory is written by another program while this one reads it, so a half-written file is
 /// an ordinary event rather than a fault — and the caller is usually a status bar or a picker,
 /// which cannot do anything useful with a complaint about one file.
-fn collect(dir: &PathBuf, now_secs: f64) -> Vec<Row> {
+fn collect(dir: &PathBuf, now_secs: f64, home: &str) -> Vec<Agent> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -115,7 +126,7 @@ fn collect(dir: &PathBuf, now_secs: f64) -> Vec<Row> {
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         .filter_map(|path| fs::read_to_string(&path).ok())
         .filter_map(|text| serde_json::from_str::<SessionFile>(&text).ok())
-        .filter_map(|file| file.row(now_secs))
+        .filter_map(|file| file.agent(now_secs, home))
         .collect()
 }
 
@@ -126,9 +137,21 @@ mod tests {
     /// A missing sessions directory means no agents, not a crash. This is what a machine that
     /// has never run Claude Code looks like.
     #[test]
-    fn a_missing_sessions_directory_yields_no_rows() {
-        let rows = collect(&PathBuf::from("/nonexistent/claude/sessions"), 0.0);
-        assert!(rows.is_empty());
+    fn a_missing_sessions_directory_yields_no_agents() {
+        let agents = collect(
+            &PathBuf::from("/nonexistent/claude/sessions"),
+            0.0,
+            "/home/you",
+        );
+        assert!(agents.is_empty());
+    }
+
+    /// 🔴 No agents is an empty array, never empty output. A consumer deserialising this must
+    /// get a document in both cases, or "nothing is running" becomes a parse error.
+    #[test]
+    fn no_agents_is_an_empty_array_not_empty_output() {
+        let empty: Vec<Agent> = Vec::new();
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "[]");
     }
 
     /// `--help` and `--version` must exist. The predecessor's lack of them is the defect this

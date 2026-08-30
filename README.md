@@ -1,7 +1,7 @@
-# claude-agents
+# claude-ps
 
-`claude-agents` prints one line for each running Claude Code agent. Each line
-carries what the agent is doing and the zellij pane it is doing it in.
+`claude-ps` is `ps` for Claude Code. It prints every running agent as JSON, and
+joins each one to the zellij pane it is running in.
 
 ## The problem
 
@@ -12,36 +12,93 @@ was set. It says nothing about zellij.
 The agent's own environment carries `ZELLIJ_SESSION_NAME` and
 `ZELLIJ_PANE_ID`. It says nothing about what the agent is doing.
 
-The two halves share one thing: the process id. `claude-agents` joins them.
+The two halves share one thing: the process id. `claude-ps` joins them.
 
 ## Output
 
-One agent per line, TAB-separated, in a fixed column order:
+A JSON array on stdout, one object per agent.
 
-```
-status  age  session  pane  name  pid  session_id  started_at  cwd
-```
-
-| Column | Content |
+| Key | Content |
 |---|---|
 | `status` | whatever Claude reports, verbatim |
 | `age` | whole seconds spent in that status |
-| `session` | `ZELLIJ_SESSION_NAME`, or `-` if the agent is not in zellij |
-| `pane` | `ZELLIJ_PANE_ID`, or `-` likewise |
-| `name` | Claude's own derived name, **not** the zellij session name |
+| `context` | `{tokens, as_of}` the session was carrying at its last assistant turn, or `null` |
+| `zellij` | `{session, pane}`, or `null` if the agent is not in zellij |
+| `name` | Claude's own derived label, **not** the zellij session name |
 | `pid` | the process id, and the key the two halves are joined on |
 | `session_id` | Claude's session uuid, matching its transcript |
 | `started_at` | epoch **seconds** the session began, or `0` if unknown |
-| `cwd` | last, and the only field that may contain whitespace |
+| `cwd` | the agent's working directory |
 
 ```console
-$ claude-agents
-waiting	35	work	0	work-f8	3318865	b08aacbc-…	1755000000	/home/you/Projects/work
-idle	5238	notes	1	notes-e1	3132891	f8f9b7ea-…	1754913000	/home/you/notes
-busy	13	-	-	scratch-2c	3129839	52b7681e-…	1755004000	/home/you/scratch
+$ claude-ps
+[
+  {
+    "status": "waiting",
+    "age": 35,
+    "context": { "tokens": 187953, "as_of": 1788052221 },
+    "zellij": { "session": "work", "pane": "0" },
+    "name": "work-f8",
+    "pid": 3318865,
+    "session_id": "b08aacbc-…",
+    "started_at": 1755000000,
+    "cwd": "/home/you/Projects/work"
+  },
+  {
+    "status": "busy",
+    "age": 13,
+    "context": null,
+    "zellij": null,
+    "name": "scratch-2c",
+    "pid": 3129839,
+    "session_id": "52b7681e-…",
+    "started_at": 1755004000,
+    "cwd": "/home/you/scratch"
+  }
+]
 ```
 
-The third agent is not in zellij, so both join columns are `-`.
+The second agent is not in zellij, so its join is `null`.
+
+**No agents is `[]`, never empty output.** A consumer deserialising this gets a
+document in both cases, so "nothing is running" is never a parse error.
+
+### `zellij` is one object, not two fields
+
+Attaching to a session and focusing a pane is a **single act** for a consumer,
+and a session without a pane is an address it cannot use. Nesting the pair makes
+the half-answer unrepresentable rather than merely discouraged — where two
+separate nullable fields would leave every consumer to check both and agree on
+what a mismatch meant.
+
+### `context` is a numerator, and only a numerator
+
+🔴 **There is no percentage here, and that is not an omission.**
+
+The context window *size* is never written to disk. Claude Code computes it and hands it to a
+status line at render time, along with the rate-limit windows — all of it in memory, none of it
+in a file this tool can read. The only way to a percentage would be a table keyed on model name,
+which would then be confidently wrong the first time a model ships that the table predates.
+
+That is the same failure the open status vocabulary is passed through untouched to avoid, and it
+is worse here: an unrecognised status renders as itself, while a wrong denominator renders as a
+number that looks right. So `claude-ps` reports what it can prove and leaves the denominator to
+whoever wants one.
+
+⚠️ `as_of` is not decoration. The count is measured at the last **completed** assistant turn, so
+a session that is `busy` right now has been growing its context since — which is exactly when
+someone is looking. The stamp is how a consumer tells a fresh number from a stale one.
+
+### The transcript join is a guess; the pid join is a proof
+
+Everything else here is joined on a pid and its start time, which cannot be wrong. `context`
+is joined by deriving a path from `cwd`, and Claude Code builds that path by replacing both `/`
+**and** `.` with `-` — which is not injective, so `/home/x/.config` and `/home/x-config` land in
+the same directory.
+
+It costs one key when it is wrong rather than a whole agent, and it is `null` when the file is
+not there. It is kept in its own module for the same reason it is described in its own section:
+it is the one thing here that is not exact.
 
 ### `age` and `started_at` are not the same question
 
@@ -58,7 +115,7 @@ The status vocabulary is **open** and moves with Claude Code's version. A
 release that emitted `busy`, `idle` and `waiting` was followed by one that also
 emits `shell`, and there is no reason that is the last word.
 
-So `claude-agents` never compares the status against a set it knows. Whatever
+So `claude-ps` never compares the status against a set it knows. Whatever
 Claude wrote is what you get. **A consumer should not match on it either** — a
 lookup table that renders only the statuses it recognises silently drops live
 agents the day Claude invents one.
@@ -76,8 +133,10 @@ the file says it did — field 22 of `/proc/<pid>/stat` against the file's
 
 ### The order is for diffing, not for reading
 
-Rows are sorted by session, then pane, then pid, so two runs a second apart
-diff cleanly. That is the only reason the order exists.
+Agents are sorted by session, then pane, then pid, with those outside zellij
+last as a group. That is the only reason the order exists — and it is why the
+output is pretty-printed rather than compact: one key per line means two runs a
+second apart differ in the lines that actually changed.
 
 Deciding what a human should see first is the consumer's job, and consumers
 disagree — a picker wants the agent that is waiting on you at the top, a status
@@ -89,18 +148,23 @@ If none of `statusUpdatedAt`, `updatedAt` or `startedAt` is present, the age is
 `0`.
 
 Reading a missing field as epoch-millisecond `0` is the obvious shortcut and it
-renders every row as roughly fifty-seven years old, which reads as data rather
-than as breakage. If Claude renames those fields, a column of `0s` is visibly
+renders every agent as roughly fifty-seven years old, which reads as data rather
+than as breakage. If Claude renames those fields, a column of `0`s is visibly
 wrong.
 
 ## Compatibility
 
-⚠️ **`started_at` was added in a way that breaks the column contract, deliberately.** It sits
-**before** `cwd`, because `cwd` has to stay last — it is the only field that may contain
-whitespace, which is what lets a consumer take it as the whole remainder of the line.
+⚠️ **The output was TAB-separated columns through `0.1.0`, and is JSON from here on.**
+There is no flag to get the old format back.
 
-So a consumer written against the previous eight columns reads `started_at` where it expects
-`cwd`. Update consumers and this tool together.
+Positional columns made every *additive* change breaking: consumers checked the field
+count exactly, so gaining `started_at` meant a picker that could not read a schema it
+otherwise understood perfectly. Named keys invert that. A consumer ignores keys it does
+not know, so a new one costs nothing and only a **removed or renamed** key is a hard
+failure — which is the polarity you want, because adding is the common case.
+
+Two other changes came with it: the `-` placeholder is gone in favour of `null`,
+and the two zellij fields are one nested object.
 
 ## Consumers
 
@@ -109,6 +173,9 @@ So a consumer written against the previous eight columns reads `started_at` wher
   pane. It cannot do this join itself: a zellij plugin's wasi sandbox preopens
   only `/host`, `/data`, `/cache` and `/tmp`, so neither `~/.claude/sessions`
   nor `/proc` is readable from inside it.
+- [claude-tray](https://github.com/lorenzolfm/claude-tray) — a system tray
+  applet showing which sessions are waiting on you. It could read the registry
+  itself and deliberately does not: one joiner, many consumers.
 
 ## Installation
 
@@ -116,24 +183,24 @@ So a consumer written against the previous eight columns reads `started_at` wher
 
 ```sh
 cargo build --release
-ln -sf "$PWD/target/release/claude-agents" ~/.local/bin/claude-agents
+ln -sf "$PWD/target/release/claude-ps" ~/.local/bin/claude-ps
 ```
 
 ### Nix
 
 ```sh
-nix profile install github:lorenzolfm/claude-agents
+nix profile install github:lorenzolfm/claude-ps
 ```
 
-⚠️ If you use `zj-picker`, it invokes this tool at
-`$HOME/.local/bin/claude-agents` — the zellij **server's** `PATH` does not
-carry `~/.local/bin`, so the plugin reaches it by absolute path. Symlink it
-there whichever way you install:
+⚠️ If you use `zj-picker`, the zellij **server's** `PATH` is not your shell's.
+The plugin looks this tool up by name there, exactly as it looks up `zoxide`, so
+wherever you install it has to be on the `PATH` the server was started with — a
+server that predates the install will not see it.
 
-```sh
-ln -sf "$(nix build --no-link --print-out-paths github:lorenzolfm/claude-agents)/bin/claude-agents" \
-    ~/.local/bin/claude-agents
-```
+Where the server's `PATH` genuinely lacks it, the plugin's `agents_command`
+configuration key names the executable to run instead. That is the supported
+escape hatch: an install path compiled into the plugin is what once made it
+unusable by anyone but its author.
 
 ## Linux only
 

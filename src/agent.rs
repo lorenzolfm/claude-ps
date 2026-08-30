@@ -1,20 +1,16 @@
-//! The session file Claude Code writes, and the row this tool prints for it.
+//! The session file Claude Code writes, and the agent this tool prints for it.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::proc;
-
-/// Placeholder for any field that has no value — including both join columns when the agent is
-/// not in zellij. Never an empty field: a consumer splitting on tabs cannot tell an empty field
-/// from a missing one, and `-` is visible in a terminal.
-pub const NONE: &str = "-";
+use crate::transcript::{self, Context};
 
 /// `~/.claude/sessions/<pid>.json`, as much of it as this tool reads.
 ///
 /// Every field is optional and unknown fields are ignored, which is deliberate rather than
 /// defensive: this schema belongs to Claude Code and moves with its releases. A field that
-/// disappears must cost one column, not the whole row.
+/// disappears must cost one key, not the whole agent.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFile {
@@ -37,7 +33,7 @@ pub struct SessionFile {
     pub status_updated_at: Option<f64>,
     pub updated_at: Option<f64>,
     /// Epoch milliseconds the session began. Dates the status as a last resort, **and** is a
-    /// column in its own right: without it a consumer cannot tell a session that just launched
+    /// key in its own right: without it a consumer cannot tell a session that just launched
     /// from one that just finished a turn, because both read as `idle` with a small `age`.
     pub started_at: Option<f64>,
 }
@@ -63,23 +59,27 @@ impl SessionFile {
             .or(self.started_at)
     }
 
-    /// The row for this file, or `None` if the agent behind it is gone.
-    pub fn row(&self, now_secs: f64) -> Option<Row> {
+    /// The agent for this file, or `None` if the process behind it is gone.
+    pub fn agent(&self, now_secs: f64, home: &str) -> Option<Agent> {
         let pid = self.pid?;
         if !self.is_live(pid) {
             return None;
         }
-        let (session, pane) = proc::zellij_of(pid);
-        Some(Row {
-            status: self.status.clone().unwrap_or_else(|| NONE.into()),
+        Some(Agent {
+            status: self.status.clone(),
             age: age_secs(now_secs, self.status_set_at()),
-            session: session.unwrap_or_else(|| NONE.into()),
-            pane: pane.unwrap_or_else(|| NONE.into()),
-            name: self.name.clone().unwrap_or_else(|| NONE.into()),
+            // Needs both halves of the path, and gives up quietly without them. This is the
+            // one join here that is a guess rather than a proof -- see `transcript`.
+            context: match (self.cwd.as_deref(), self.session_id.as_deref()) {
+                (Some(cwd), Some(session_id)) => transcript::context_of(home, cwd, session_id),
+                _ => None,
+            },
+            zellij: Zellij::of(pid),
+            name: self.name.clone(),
             pid,
-            session_id: self.session_id.clone().unwrap_or_else(|| NONE.into()),
+            session_id: self.session_id.clone(),
             started_at: epoch_secs(self.started_at),
-            cwd: self.cwd.clone().unwrap_or_else(|| NONE.into()),
+            cwd: self.cwd.clone(),
         })
     }
 }
@@ -97,9 +97,9 @@ fn json_scalar(value: &Value) -> String {
 /// Whole seconds spent in the current status.
 ///
 /// ⚠️ An unknown timestamp is **zero**, not "now minus the epoch". Reading a missing field as
-/// `0` epoch-milliseconds is the obvious shortcut and it renders every row as roughly
+/// `0` epoch-milliseconds is the obvious shortcut and it renders every agent as roughly
 /// fifty-seven years old, which looks like data rather than like breakage — so if Claude ever
-/// renames these fields the failure is a column of `0s`, which is visibly wrong.
+/// renames these fields the failure is a column of `0`s, which is visibly wrong.
 pub fn age_secs(now_secs: f64, status_set_at_ms: Option<f64>) -> u64 {
     let Some(set_at_ms) = status_set_at_ms else {
         return 0;
@@ -116,7 +116,7 @@ pub fn age_secs(now_secs: f64, status_set_at_ms: Option<f64>) -> u64 {
 ///
 /// ⚠️ An absent timestamp is `0`, on the same reasoning as [`age_secs`]: it renders as 1970,
 /// which reads as breakage rather than as data. It also fails in the safe direction for the one
-/// thing this column exists for — a consumer suppressing just-launched sessions computes an
+/// thing this key exists for — a consumer suppressing just-launched sessions computes an
 /// enormous session age, so it suppresses nothing rather than hiding a live agent.
 pub fn epoch_secs(ms: Option<f64>) -> u64 {
     let Some(ms) = ms else {
@@ -130,50 +130,71 @@ pub fn epoch_secs(ms: Option<f64>) -> u64 {
     }
 }
 
-/// One agent, as one output line.
-pub struct Row {
-    pub status: String,
-    pub age: u64,
+/// Where an agent is sitting, when it is sitting in zellij at all.
+///
+/// 🔴 The two halves are **one object or nothing**, never one of each. Attaching to a session
+/// and focusing a pane is a single act for a consumer, and a session without a pane would be an
+/// address it cannot use. Nesting them makes that unrepresentable rather than merely documented
+/// — which is what the old pair of `-` placeholders left to prose.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct Zellij {
     pub session: String,
     pub pane: String,
-    pub name: String,
+}
+
+impl Zellij {
+    /// Read from the agent's own environment. This is the half of the join Claude does not
+    /// write down: the session file says what an agent is doing and nothing about where it is.
+    fn of(pid: u32) -> Option<Self> {
+        match proc::zellij_of(pid) {
+            (Some(session), Some(pane)) => Some(Zellij { session, pane }),
+            _ => None,
+        }
+    }
+}
+
+/// One agent, as one JSON object.
+///
+/// 🔴 Key order here is the order they serialise in, and it is the reading order: what the
+/// agent is doing, then how long, then where it is. Consumers address these **by name**, so
+/// adding a key is not a breaking change the way appending a column was.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct Agent {
+    /// Verbatim from Claude Code. `null` only if the file had no status at all.
+    pub status: Option<String>,
+    /// Whole seconds in the current status.
+    pub age: u64,
+    /// How many tokens the session was carrying at its last assistant turn, or `null` when the
+    /// transcript could not be found or held no turn.
+    ///
+    /// ⚠️ Tokens only — there is deliberately no percentage. The window size is never written
+    /// to disk, so a denominator here would have to come from a model-name table that goes
+    /// confidently wrong the day a new model ships. The consumer owns that decision.
+    pub context: Option<Context>,
+    /// `null` when the agent is not inside zellij, which is an ordinary state and not a fault.
+    pub zellij: Option<Zellij>,
+    /// Claude's own derived label, **not** the zellij session name.
+    pub name: Option<String>,
     pub pid: u32,
-    pub session_id: String,
+    pub session_id: Option<String>,
     /// Epoch seconds, and deliberately absolute where `age` is a duration: it answers *when did
     /// this session begin*, which does not go stale between this process reading it and a
     /// consumer using it.
     pub started_at: u64,
-    pub cwd: String,
+    pub cwd: Option<String>,
 }
 
-impl Row {
-    /// 🔴 The column order is a published contract — a zellij plugin splits this into exactly
-    /// nine fields and reads them by position. `cwd` is last because it is the only field that
-    /// can plausibly contain whitespace, so a consumer can take it as the whole remainder of
-    /// the line instead of as a field with a terminator.
-    ///
-    /// ⚠️ `started_at` was added *before* `cwd` rather than after it, for that reason. That is a
-    /// breaking change to the contract: a consumer reading the old eight positions gets
-    /// `started_at` where it expects `cwd`.
-    pub fn to_tsv(&self) -> String {
-        format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            self.status,
-            self.age,
-            self.session,
-            self.pane,
-            self.name,
-            self.pid,
-            self.session_id,
-            self.started_at,
-            self.cwd
-        )
-    }
-
+impl Agent {
     /// Deterministic, **not** presentational. Two runs a second apart diff cleanly; deciding
     /// what order a human should see them in belongs to whatever is doing the showing.
-    pub fn sort_key(&self) -> (&str, &str, u32) {
-        (&self.session, &self.pane, self.pid)
+    ///
+    /// Agents outside zellij sort last as a group, because the empty key sorts before every
+    /// real session name and putting them first would bury the addressable ones.
+    pub fn sort_key(&self) -> (bool, &str, &str, u32) {
+        match &self.zellij {
+            Some(z) => (false, z.session.as_str(), z.pane.as_str(), self.pid),
+            None => (true, "", "", self.pid),
+        }
     }
 }
 
@@ -181,54 +202,57 @@ impl Row {
 mod tests {
     use super::*;
 
-    fn row() -> Row {
-        Row {
-            status: "waiting".into(),
+    fn agent() -> Agent {
+        Agent {
+            status: Some("waiting".into()),
             age: 35,
-            session: "work".into(),
-            pane: "1".into(),
-            name: "work-f8".into(),
+            context: Some(Context {
+                tokens: 187_953,
+                as_of: 1_788_052_221,
+            }),
+            zellij: Some(Zellij {
+                session: "work".into(),
+                pane: "1".into(),
+            }),
+            name: Some("work-f8".into()),
             pid: 4242,
-            session_id: "abc-123".into(),
+            session_id: Some("abc-123".into()),
             started_at: 1_755_000_000,
-            cwd: "/home/you/src".into(),
+            cwd: Some("/home/you/src".into()),
         }
     }
 
     #[test]
-    fn tsv_has_nine_fields_in_the_published_order() {
-        let line = row().to_tsv();
-        let fields: Vec<&str> = line.split('\t').collect();
-        assert_eq!(fields.len(), 9);
+    fn serialises_every_key_in_the_published_order() {
+        let json = serde_json::to_string(&agent()).unwrap();
         assert_eq!(
-            fields,
-            [
-                "waiting",
-                "35",
-                "work",
-                "1",
-                "work-f8",
-                "4242",
-                "abc-123",
-                "1755000000",
-                "/home/you/src"
-            ]
+            json,
+            r#"{"status":"waiting","age":35,"context":{"tokens":187953,"as_of":1788052221},"zellij":{"session":"work","pane":"1"},"name":"work-f8","pid":4242,"session_id":"abc-123","started_at":1755000000,"cwd":"/home/you/src"}"#
         );
     }
 
-    /// The reason cwd is last: it is the only field allowed to contain whitespace, and a
-    /// consumer must still see exactly nine fields. This is also why `started_at` went in
-    /// before it rather than after.
+    /// 🔴 The reason the pair is nested. An agent outside zellij has no address at all, and one
+    /// `null` says that where two placeholders left a consumer to check both and agree on what
+    /// the pair meant.
     #[test]
-    fn a_cwd_with_whitespace_stays_one_trailing_field() {
-        let mut row = row();
-        row.cwd = "/home/you/my projects/thing".into();
-        let line = row.to_tsv();
-        assert_eq!(line.splitn(9, '\t').count(), 9);
-        assert!(line.ends_with("\t/home/you/my projects/thing"));
+    fn an_agent_outside_zellij_is_one_null() {
+        let mut agent = agent();
+        agent.zellij = None;
+        let value: Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["zellij"], Value::Null);
     }
 
-    /// 🔴 The whole reason this column exists: a session that just launched and one that just
+    /// A cwd with whitespace needed a rule about column position under TSV. Under JSON it needs
+    /// nothing: it is a string, and the encoder owns the escaping.
+    #[test]
+    fn a_cwd_with_whitespace_needs_no_special_handling() {
+        let mut agent = agent();
+        agent.cwd = Some("/home/you/my projects/thing".into());
+        let value: Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["cwd"], "/home/you/my projects/thing");
+    }
+
+    /// 🔴 The whole reason this key exists: a session that just launched and one that just
     /// finished a turn are both `idle` with a small `age`, and only `started_at` separates them.
     #[test]
     fn started_at_separates_a_newborn_from_a_finished_turn() {
@@ -239,7 +263,7 @@ mod tests {
             serde_json::from_str(r#"{"startedAt":1754000000000,"statusUpdatedAt":1755000002000}"#)
                 .unwrap();
 
-        // Identical from `age` alone -- the column a consumer had before this one.
+        // Identical from `age` alone -- the only thing a consumer had before this key.
         assert_eq!(
             age_secs(1_755_000_012.0, newborn.status_set_at()),
             age_secs(1_755_000_012.0, finished.status_set_at())
@@ -284,8 +308,8 @@ mod tests {
         assert_eq!(json_scalar(&serde_json::json!("987654")), "987654");
     }
 
-    /// Unknown fields are ignored and missing ones are `None`, so a schema change costs a
-    /// column rather than the row.
+    /// Unknown fields are ignored and missing ones are `None`, so a schema change costs a key
+    /// rather than the agent.
     #[test]
     fn session_file_tolerates_a_moving_schema() {
         let file: SessionFile =
@@ -311,14 +335,25 @@ mod tests {
     #[test]
     fn a_file_without_proc_start_is_not_live() {
         let file: SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
-        assert!(file.row(0.0).is_none());
+        assert!(file.agent(0.0, "/home/you").is_none());
     }
 
     #[test]
     fn sort_key_orders_by_session_then_pane_then_pid() {
-        let mut a = row();
-        a.session = "alpha".into();
-        let b = row();
-        assert!(a.sort_key() < b.sort_key());
+        let mut a = agent();
+        a.zellij = Some(Zellij {
+            session: "alpha".into(),
+            pane: "1".into(),
+        });
+        assert!(a.sort_key() < agent().sort_key());
+    }
+
+    /// Outside-zellij agents group at the end rather than at the front, where an empty session
+    /// name would otherwise put them.
+    #[test]
+    fn agents_outside_zellij_sort_last() {
+        let mut outside = agent();
+        outside.zellij = None;
+        assert!(agent().sort_key() < outside.sort_key());
     }
 }
