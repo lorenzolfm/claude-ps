@@ -1,6 +1,17 @@
 # claude-ps
 
-`claude-ps` is `ps` for Claude Code. It prints all running agents as JSON.
+`claude-ps` is `ps` for Claude Code. It prints all running agents as JSON, or
+as a table with `--format text`.
+
+```console
+$ claude-ps --format text
+====================================================================
+ NAME        STATUS   AGE  ELAPSED  CWD                  PID  ZELLIJ
+====================================================================
+ scratch-2c  busy     13s    2h 5m  ~/scratch        3129839  -
+ work-f8     waiting  35s    1h 4m  ~/Projects/work  3318865  work:0
+====================================================================
+```
 
 ## Installation
 
@@ -63,6 +74,20 @@ $ claude-ps
 ]
 ```
 
+## A table for a person
+
+`claude-ps --format text` prints the same agents as the table at the top of
+this page. It shows the durations in hours and minutes, the home directory as
+`~`, and the zellij address as `session:pane`. A key that the session file does
+not have is `-`.
+
+`AGE` is the time in the current status. `ELAPSED` is the time since the
+session started.
+
+This table is for eyes only. The columns, the order, and the format of a value
+change without a note, and no agents prints `no agents` and not an empty
+document. Read the JSON from a program.
+
 ## Rules for consumers
 
 **The status vocabulary is open.** Claude Code adds new values in new releases.
@@ -88,7 +113,8 @@ closes the pipe, which is what `head` does. It is 1 if `claude-ps` cannot write
 its output, for example when the disk is full, and the message goes to stderr.
 
 **The order is stable, and not presentational.** `claude-ps` sorts the agents by
-pid. Sort the agents again if you show them to a person.
+pid. Sort the agents again if you show them to a person. The table of
+`--format text` is sorted by name.
 
 ## Zellij support
 

@@ -1,4 +1,5 @@
 mod agent;
+mod human;
 mod proc;
 
 use clap::Parser;
@@ -34,14 +35,30 @@ Agents with a stale session file do not appear: the pid must be alive, and the
 start time of the process must agree with the session file.
 
 The order is by pid. This order is for stable diffs. Sort the agents again to
-show them to a person."
+show them to a person.
+
+--format text prints a table for a person instead: one line for each agent, the
+timestamps as durations, and the home directory as ~. That table has no
+stability rule, and its order is by name. Read the JSON from a program."
 )]
-struct Cli {}
+struct Cli {
+    /// json for a program, text for a person
+    #[arg(short, long, value_enum, default_value_t = Format::Json)]
+    format: Format,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+enum Format {
+    /// A JSON array, one object for each agent. The documented format.
+    Json,
+    /// A padded table with one header line. For eyes only.
+    Text,
+}
 
 fn main() -> std::process::ExitCode {
-    Cli::parse();
+    let cli = Cli::parse();
 
-    match run() {
+    match run(cli.format) {
         Ok(output) => match write_stdout(&output) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             // The reader closed the pipe, which is what `| head` does. The reader has the
@@ -76,7 +93,7 @@ fn write_stdout(output: &str) -> std::io::Result<()> {
     stdout.flush()
 }
 
-fn run() -> Result<String, String> {
+fn run(format: Format) -> Result<String, String> {
     let now_secs = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -92,11 +109,16 @@ fn run() -> Result<String, String> {
     // change while the agent runs.
     agents.sort_by_key(|agent| agent.pid);
 
-    // One key per line, so two runs one second apart give a small diff.
-    let mut out = serde_json::to_string_pretty(&agents)
-        .map_err(|error| format!("could not serialise the agent list: {error}"))?;
-    out.push('\n');
-    Ok(out)
+    match format {
+        Format::Json => {
+            // One key per line, so two runs one second apart give a small diff.
+            let mut out = serde_json::to_string_pretty(&agents)
+                .map_err(|error| format!("could not serialise the agent list: {error}"))?;
+            out.push('\n');
+            Ok(out)
+        }
+        Format::Text => Ok(human::table(&agents, now_secs, &home)),
+    }
 }
 
 fn home() -> Result<String, String> {
