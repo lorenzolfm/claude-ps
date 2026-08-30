@@ -1,101 +1,98 @@
-//! `claude-ps` — `ps` for Claude Code, joined to the zellij pane each agent runs in.
-//!
-//! Claude Code writes `~/.claude/sessions/<pid>.json` for each running agent, carrying what it
-//! is doing. That file says nothing about zellij. The agent's own environment says nothing
-//! about what it is doing. `pid` is the only thing they share, and joining on it is the whole
-//! job of this tool.
-
 mod agent;
 mod proc;
-mod transcript;
-
-use std::fs;
-use std::io::{self, Write};
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use std::io::Write;
 
-use agent::{Agent, SessionFile};
-
-/// Printed by `--help`, which the Python this replaces did not implement at all: it ignored
-/// `argv` entirely and printed the table whatever you asked it.
-#[derive(Parser)]
+#[derive(clap::Parser)]
 #[command(
     name = "claude-ps",
     version,
-    about = "ps for Claude Code, joined to the zellij pane each agent runs in",
+    about = "ps for Claude Code: all running agents, as JSON",
     long_about = "\
-ps for Claude Code: every running agent, joined to the zellij pane it runs in.
+ps for Claude Code. Prints all running agents as a JSON array on stdout, one
+object per agent:
 
-Output is a JSON array on stdout, one object per agent:
+  status              what Claude reports, verbatim (busy, idle, waiting, ...)
+  status_age          whole seconds in that status
+  zellij              {session, pane}, or null if the agent is not in zellij
+  name                Claude's own label for the session
+  pid                 the process id
+  session_id          Claude's session uuid, which is also the transcript name
+  session_started_at  epoch seconds when the session started, or 0 if unknown
+  cwd                 the working directory of the agent
 
-  status      whatever Claude reports, verbatim (busy, idle, waiting, shell, ...)
-  age         whole seconds spent in that status
-  context     {tokens, as_of} at the last assistant turn, or null
-  zellij      {session, pane}, or null when the agent is not inside zellij
-  name        Claude's own derived label, NOT the zellij session name
-  pid         the process id, and the key the two halves are joined on
-  session_id  Claude's session uuid, matching its transcript
-  started_at  epoch seconds the session began, or 0 if unknown
-  cwd         the agent's working directory
+The status vocabulary is open and changes with the version of Claude Code. Do
+not compare the status against a fixed set of values.
 
-age and started_at answer different questions and a consumer needs both. A
-session that has just launched and one that has just finished a turn are both
-idle with a small age; only the launch time tells them apart.
+status_age and session_started_at answer different questions. status_age is the
+time in the current status. session_started_at is the time when the session
+started. A new session and a session that completed a turn are both idle with a
+small status_age. Only session_started_at makes them different.
 
-The status vocabulary is open and moves with Claude Code's version, so it is
-passed through untouched. Do not match it against a fixed set.
+Agents with a stale session file do not appear: the pid must be alive, and the
+start time of the process must agree with the session file.
 
-context is tokens only, never a percentage: the window size is not written to
-disk anywhere, so a denominator would have to come from a model-name table that
-goes confidently wrong the day a new model ships. It is also the one inexact
-join here -- the transcript path is derived from cwd -- so it is null rather
-than a guess when the file is not found.
-
-Agents are ordered by session, then pane, then pid, with those outside zellij
-last. That is for stable diffs between runs, not for display: ordering for a
-human belongs to the consumer.
-
-Agents whose session file is stale are omitted. Liveness is exact rather than
-heuristic -- the pid must be alive AND have started when the file says it did,
-so a recycled pid cannot pass a dead agent off as a live one."
+The order is by pid. This order is for stable diffs. Sort the agents again to
+show them to a person."
 )]
 struct Cli {}
 
-fn main() -> ExitCode {
+fn main() -> std::process::ExitCode {
     Cli::parse();
+
     match run() {
-        Ok(output) => {
-            // Written in one call: a consumer polling this on a timer should see a whole
-            // document or nothing, never half of one.
-            if io::stdout().write_all(output.as_bytes()).is_err() {
-                // A closed pipe is what `| head` looks like from in here. Not an error.
-                return ExitCode::SUCCESS;
+        Ok(output) => match write_stdout(&output) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            // The reader closed the pipe, which is what `| head` does. The reader has the
+            // data it wants, so this tool did not fail.
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                std::process::ExitCode::SUCCESS
             }
-            ExitCode::SUCCESS
-        }
+            // All other write errors are real. A full disk during `claude-ps > agents.json`
+            // gives a truncated file, and the caller must hear about it.
+            Err(error) => {
+                eprintln!("claude-ps: could not write to stdout: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         Err(error) => {
             eprintln!("claude-ps: {error}");
-            ExitCode::FAILURE
+            std::process::ExitCode::FAILURE
         }
     }
 }
 
+/// Write the document to stdout, then flush it.
+///
+/// One call for the full document, so a consumer that reads this on a timer sees all of it or
+/// none of it.
+///
+/// The flush is explicit. `Stdout` is line buffered, so a write can report success and the
+/// flush that follows can still fail. The runtime flushes at exit and discards that error.
+fn write_stdout(output: &str) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout();
+    stdout.write_all(output.as_bytes())?;
+    stdout.flush()
+}
+
 fn run() -> Result<String, String> {
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "the system clock is before the epoch".to_string())?
-        .as_secs_f64();
+    let now_secs = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "the system clock is before the epoch".to_string())?
+            .as_secs(),
+    )
+    .map_err(|_| "the system clock is too far in the future".to_string())?;
 
     let home = home()?;
-    let mut agents = collect(&sessions_dir(&home), now_secs, &home);
-    agents.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    let mut agents = collect(&sessions_dir(&home), now_secs);
 
-    // Pretty rather than compact, and that is a choice about diffing as much as about reading:
-    // one key per line means two runs a second apart differ in the lines that actually changed,
-    // which is what the sort order exists to make possible.
+    // A stable order, so that two runs give a small diff. The pid is unique and does not
+    // change while the agent runs.
+    agents.sort_by_key(|agent| agent.pid);
+
+    // One key per line, so two runs one second apart give a small diff.
     let mut out = serde_json::to_string_pretty(&agents)
         .map_err(|error| format!("could not serialise the agent list: {error}"))?;
     out.push('\n');
@@ -106,59 +103,48 @@ fn home() -> Result<String, String> {
     std::env::var("HOME").map_err(|_| "HOME is not set".to_string())
 }
 
-fn sessions_dir(home: &str) -> PathBuf {
-    PathBuf::from(home).join(".claude").join("sessions")
+fn sessions_dir(home: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(home)
+        .join(".claude")
+        .join("sessions")
 }
 
-/// Every readable session file that still has a live agent behind it.
+/// All readable session files that have a live agent.
 ///
-/// ⚠️ Unreadable and malformed files are skipped in silence, and that is deliberate. This
-/// directory is written by another program while this one reads it, so a half-written file is
-/// an ordinary event rather than a fault — and the caller is usually a status bar or a picker,
-/// which cannot do anything useful with a complaint about one file.
-fn collect(dir: &PathBuf, now_secs: f64, home: &str) -> Vec<Agent> {
-    let Ok(entries) = fs::read_dir(dir) else {
+/// A file that this tool cannot read or parse is skipped without a message. Claude Code writes
+/// to this directory while this tool reads it, so an incomplete file is a normal event.
+fn collect(dir: &std::path::PathBuf, now_secs: i64) -> Vec<agent::Agent> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|path| fs::read_to_string(&path).ok())
-        .filter_map(|text| serde_json::from_str::<SessionFile>(&text).ok())
-        .filter_map(|file| file.agent(now_secs, home))
+        .filter_map(|path| std::fs::read_to_string(&path).ok())
+        .filter_map(|text| serde_json::from_str::<agent::SessionFile>(&text).ok())
+        .filter_map(|file| file.agent(now_secs))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    /// A missing sessions directory means no agents, not a crash. This is what a machine that
-    /// has never run Claude Code looks like.
     #[test]
     fn a_missing_sessions_directory_yields_no_agents() {
-        let agents = collect(
-            &PathBuf::from("/nonexistent/claude/sessions"),
-            0.0,
-            "/home/you",
-        );
+        let agents = super::collect(&std::path::PathBuf::from("/nonexistent/claude/sessions"), 0);
         assert!(agents.is_empty());
     }
 
-    /// 🔴 No agents is an empty array, never empty output. A consumer deserialising this must
-    /// get a document in both cases, or "nothing is running" becomes a parse error.
     #[test]
     fn no_agents_is_an_empty_array_not_empty_output() {
-        let empty: Vec<Agent> = Vec::new();
+        let empty: Vec<crate::agent::Agent> = Vec::new();
         assert_eq!(serde_json::to_string(&empty).unwrap(), "[]");
     }
 
-    /// `--help` and `--version` must exist. The predecessor's lack of them is the defect this
-    /// binary was written to stop repeating.
     #[test]
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
-        Cli::command().debug_assert();
+
+        super::Cli::command().debug_assert();
     }
 }
