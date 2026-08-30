@@ -125,15 +125,15 @@ ln -sf "$PWD/target/release/claude-ps" ~/.local/bin/claude-ps
 nix profile install github:lorenzolfm/claude-ps
 ```
 
-⚠️ If you use `zj-picker`, it invokes this tool at
-`$HOME/.local/bin/claude-ps` — the zellij **server's** `PATH` does not
-carry `~/.local/bin`, so the plugin reaches it by absolute path. Symlink it
-there whichever way you install:
+⚠️ If you use `zj-picker`, the zellij **server's** `PATH` is not your shell's.
+The plugin looks this tool up by name there, exactly as it looks up `zoxide`, so
+wherever you install it has to be on the `PATH` the server was started with — a
+server that predates the install will not see it.
 
-```sh
-ln -sf "$(nix build --no-link --print-out-paths github:lorenzolfm/claude-ps)/bin/claude-ps" \
-    ~/.local/bin/claude-ps
-```
+Where the server's `PATH` genuinely lacks it, the plugin's `agents_command`
+configuration key names the executable to run instead. That is the supported
+escape hatch: an install path compiled into the plugin is what once made it
+unusable by anyone but its author.
 
 ## Linux only
 
