@@ -30,8 +30,25 @@
         pkgs,
         ...
       }: let
-        craneLib = (crane.mkLib pkgs).overrideToolchain (p:
-          p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
+        craneLib =
+          (crane.mkLib pkgs).overrideToolchain (p:
+            p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
+
+        # The gates build with the toolchain file as it is written: minimal. The
+        # dev shell adds rust-src on top. rust-analyzer reads the documentation
+        # of the standard library from those sources. Without them it shows
+        # nothing for std items, such as ExitCode or eprintln!. No gate needs
+        # the sources, so they stay out of the build closure.
+        #
+        # `override` replaces the component list, it does not add to it. Read
+        # the list from the toolchain file, so the dev shell keeps clippy,
+        # rustfmt and rust-analyzer.
+        toolchainFile = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
+
+        craneLibDev = (crane.mkLib pkgs).overrideToolchain (p:
+          (p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
+            extensions = toolchainFile.toolchain.components ++ ["rust-src"];
+          });
 
         src = craneLib.cleanCargoSource ./.;
 
@@ -104,7 +121,7 @@
           program = "${pkgs.lib.getExe claude-ps}";
         };
 
-        devShells.default = craneLib.devShell {
+        devShells.default = craneLibDev.devShell {
           packages = with pkgs; [
             cargo-nextest
           ];
