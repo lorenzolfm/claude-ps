@@ -43,20 +43,20 @@
         # Build only the dependencies, so CI can cache that work.
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        claude-agents = craneLib.buildPackage (commonArgs
+        claude-ps = craneLib.buildPackage (commonArgs
           // {
             inherit cargoArtifacts;
 
-            pname = "claude-agents";
+            pname = "claude-ps";
 
             # The test gate runs the tests. Do not run them two times.
             doCheck = false;
 
             meta = {
               description = "One line per running Claude Code agent, joined to its zellij pane";
-              homepage = "https://github.com/lorenzolfm/claude-agents";
+              homepage = "https://github.com/lorenzolfm/claude-ps";
               license = pkgs.lib.licenses.mit;
-              mainProgram = "claude-agents";
+              mainProgram = "claude-ps";
               platforms = pkgs.lib.platforms.linux;
             };
           });
@@ -64,24 +64,24 @@
         # One derivation for each gate. CI builds them in parallel, and
         # `nix flake check` runs all of them.
         gates = {
-          inherit claude-agents;
+          inherit claude-ps;
 
           # Each gate is a separate derivation. A lint failure therefore stops
           # CI, but it does not stop a user who only wants to build the crate.
-          claude-agents-clippy = craneLib.cargoClippy (commonArgs
+          claude-ps-clippy = craneLib.cargoClippy (commonArgs
             // {
               inherit cargoArtifacts;
               cargoClippyExtraArgs = "--all-targets -- --deny warnings";
             });
 
-          claude-agents-test = craneLib.cargoNextest (commonArgs
+          claude-ps-test = craneLib.cargoNextest (commonArgs
             // {
               inherit cargoArtifacts;
               partitions = 1;
               partitionType = "count";
             });
 
-          claude-agents-fmt = craneLib.cargoFmt {inherit src;};
+          claude-ps-fmt = craneLib.cargoFmt {inherit src;};
         };
       in {
         _module.args.pkgs = import nixpkgs {
@@ -96,12 +96,12 @@
         packages =
           gates
           // {
-            default = claude-agents;
+            default = claude-ps;
           };
 
         apps.default = {
           type = "app";
-          program = "${pkgs.lib.getExe claude-agents}";
+          program = "${pkgs.lib.getExe claude-ps}";
         };
 
         devShells.default = craneLib.devShell {

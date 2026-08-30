@@ -1,4 +1,4 @@
-//! `claude-agents` — one line per running Claude Code agent, joined to its zellij pane.
+//! `claude-ps` — one line per running Claude Code agent, joined to its zellij pane.
 //!
 //! Claude Code writes `~/.claude/sessions/<pid>.json` for each running agent, carrying what it
 //! is doing. That file says nothing about zellij. The agent's own environment says nothing
@@ -22,7 +22,7 @@ use agent::{Row, SessionFile};
 /// `argv` entirely and printed the table whatever you asked it.
 #[derive(Parser)]
 #[command(
-    name = "claude-agents",
+    name = "claude-ps",
     version,
     about = "One line per running Claude Code agent, joined to its zellij pane",
     long_about = "\
@@ -71,7 +71,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("claude-agents: {error}");
+            eprintln!("claude-ps: {error}");
             ExitCode::FAILURE
         }
     }

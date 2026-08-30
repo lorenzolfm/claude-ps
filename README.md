@@ -1,6 +1,6 @@
-# claude-agents
+# claude-ps
 
-`claude-agents` prints one line for each running Claude Code agent. Each line
+`claude-ps` prints one line for each running Claude Code agent. Each line
 carries what the agent is doing and the zellij pane it is doing it in.
 
 ## The problem
@@ -12,7 +12,7 @@ was set. It says nothing about zellij.
 The agent's own environment carries `ZELLIJ_SESSION_NAME` and
 `ZELLIJ_PANE_ID`. It says nothing about what the agent is doing.
 
-The two halves share one thing: the process id. `claude-agents` joins them.
+The two halves share one thing: the process id. `claude-ps` joins them.
 
 ## Output
 
@@ -35,7 +35,7 @@ status  age  session  pane  name  pid  session_id  started_at  cwd
 | `cwd` | last, and the only field that may contain whitespace |
 
 ```console
-$ claude-agents
+$ claude-ps
 waiting	35	work	0	work-f8	3318865	b08aacbc-…	1755000000	/home/you/Projects/work
 idle	5238	notes	1	notes-e1	3132891	f8f9b7ea-…	1754913000	/home/you/notes
 busy	13	-	-	scratch-2c	3129839	52b7681e-…	1755004000	/home/you/scratch
@@ -58,7 +58,7 @@ The status vocabulary is **open** and moves with Claude Code's version. A
 release that emitted `busy`, `idle` and `waiting` was followed by one that also
 emits `shell`, and there is no reason that is the last word.
 
-So `claude-agents` never compares the status against a set it knows. Whatever
+So `claude-ps` never compares the status against a set it knows. Whatever
 Claude wrote is what you get. **A consumer should not match on it either** — a
 lookup table that renders only the statuses it recognises silently drops live
 agents the day Claude invents one.
@@ -116,23 +116,23 @@ So a consumer written against the previous eight columns reads `started_at` wher
 
 ```sh
 cargo build --release
-ln -sf "$PWD/target/release/claude-agents" ~/.local/bin/claude-agents
+ln -sf "$PWD/target/release/claude-ps" ~/.local/bin/claude-ps
 ```
 
 ### Nix
 
 ```sh
-nix profile install github:lorenzolfm/claude-agents
+nix profile install github:lorenzolfm/claude-ps
 ```
 
 ⚠️ If you use `zj-picker`, it invokes this tool at
-`$HOME/.local/bin/claude-agents` — the zellij **server's** `PATH` does not
+`$HOME/.local/bin/claude-ps` — the zellij **server's** `PATH` does not
 carry `~/.local/bin`, so the plugin reaches it by absolute path. Symlink it
 there whichever way you install:
 
 ```sh
-ln -sf "$(nix build --no-link --print-out-paths github:lorenzolfm/claude-agents)/bin/claude-agents" \
-    ~/.local/bin/claude-agents
+ln -sf "$(nix build --no-link --print-out-paths github:lorenzolfm/claude-ps)/bin/claude-ps" \
+    ~/.local/bin/claude-ps
 ```
 
 ## Linux only

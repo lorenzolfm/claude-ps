@@ -1,10 +1,10 @@
 [package]
-name = "claude-agents"
+name = "claude-ps"
 version = "0.1.0"
 edition = "2024"
 description = "One line per running Claude Code agent, joined to its zellij pane"
 license = "MIT"
-repository = "https://github.com/lorenzolfm/claude-agents"
+repository = "https://github.com/lorenzolfm/claude-ps"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
