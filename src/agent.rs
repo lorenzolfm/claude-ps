@@ -20,12 +20,12 @@ pub struct SessionFile {
     pub session_id: Option<String>,
     pub cwd: Option<String>,
     /// Epoch milliseconds. The first of these three fields that is present dates the status.
-    pub status_updated_at: Option<f64>,
-    pub updated_at: Option<f64>,
+    pub status_updated_at: Option<i64>,
+    pub updated_at: Option<i64>,
     /// Epoch milliseconds when the session started. It dates the status as a last resort, and it
     /// is also an output key: a new session and a session that completed a turn are both `idle`
     /// with a small age, and only this field makes them different.
-    pub started_at: Option<f64>,
+    pub started_at: Option<i64>,
 }
 
 impl SessionFile {
@@ -41,14 +41,14 @@ impl SessionFile {
     }
 
     /// Milliseconds since the epoch that the current status was set, if it is known at all.
-    fn status_set_at(&self) -> Option<f64> {
+    fn status_set_at(&self) -> Option<i64> {
         self.status_updated_at
             .or(self.updated_at)
             .or(self.started_at)
     }
 
     /// The agent for this file, or `None` if the process behind it is gone.
-    pub fn agent(&self, now_secs: f64, home: &str) -> Option<Agent> {
+    pub fn agent(&self, now_secs: i64, home: &str) -> Option<Agent> {
         let pid = self.pid?;
         if !self.is_live(pid) {
             return None;
@@ -89,32 +89,23 @@ fn json_scalar(value: &serde_json::Value) -> String {
 /// An unknown timestamp gives an age of `0`. A missing field read as epoch millisecond `0` would
 /// show every agent with an age of approximately 57 years, which looks like data and not like a
 /// fault.
-pub fn age_secs(now_secs: f64, status_set_at_ms: Option<f64>) -> u64 {
+pub fn age_secs(now_secs: i64, status_set_at_ms: Option<i64>) -> u64 {
     let Some(set_at_ms) = status_set_at_ms else {
         return 0;
     };
-    let elapsed = now_secs - set_at_ms / 1000.0;
-    if elapsed.is_nan() || elapsed <= 0.0 {
-        0
-    } else {
-        elapsed as u64
-    }
+    let elapsed_ms = now_secs.saturating_mul(1000).saturating_sub(set_at_ms);
+    u64::try_from(elapsed_ms / 1000).unwrap_or(0)
 }
 
 /// Epoch seconds for a timestamp that Claude Code writes in milliseconds.
 ///
 /// An absent timestamp gives `0`, for the same reason as [`age_secs`]. A consumer that hides new
 /// sessions then computes a very large age, so it hides nothing.
-pub fn epoch_secs(ms: Option<f64>) -> u64 {
+pub fn epoch_secs(ms: Option<i64>) -> u64 {
     let Some(ms) = ms else {
         return 0;
     };
-    let secs = ms / 1000.0;
-    if secs.is_nan() || secs <= 0.0 {
-        0
-    } else {
-        secs as u64
-    }
+    u64::try_from(ms / 1000).unwrap_or(0)
 }
 
 /// Where an agent runs in zellij.
@@ -235,8 +226,8 @@ mod tests {
 
         // Identical from `age` alone -- the only thing a consumer had before this key.
         assert_eq!(
-            super::age_secs(1_755_000_012.0, newborn.status_set_at()),
-            super::age_secs(1_755_000_012.0, finished.status_set_at())
+            super::age_secs(1_755_000_012, newborn.status_set_at()),
+            super::age_secs(1_755_000_012, finished.status_set_at())
         );
 
         // Separable once the launch time is carried too.
@@ -247,23 +238,23 @@ mod tests {
     #[test]
     fn an_undated_start_is_zero_not_now() {
         assert_eq!(super::epoch_secs(None), 0);
-        assert_eq!(super::epoch_secs(Some(-1.0)), 0);
-        assert_eq!(super::epoch_secs(Some(1_755_000_000_999.0)), 1_755_000_000);
+        assert_eq!(super::epoch_secs(Some(-1)), 0);
+        assert_eq!(super::epoch_secs(Some(1_755_000_000_999)), 1_755_000_000);
     }
 
     #[test]
     fn age_is_whole_seconds_since_the_status_was_set() {
-        assert_eq!(super::age_secs(1_000.0, Some(940_500.0)), 59);
+        assert_eq!(super::age_secs(1_000, Some(940_500)), 59);
     }
 
     #[test]
     fn age_clamps_a_future_timestamp_to_zero() {
-        assert_eq!(super::age_secs(1_000.0, Some(9_999_000.0)), 0);
+        assert_eq!(super::age_secs(1_000, Some(9_999_000)), 0);
     }
 
     #[test]
     fn age_of_an_undated_status_is_zero_not_the_epoch() {
-        assert_eq!(super::age_secs(1_755_000_000.0, None), 0);
+        assert_eq!(super::age_secs(1_755_000_000, None), 0);
     }
 
     #[test]
@@ -287,16 +278,16 @@ mod tests {
     fn status_set_at_prefers_the_most_specific_stamp() {
         let file: super::SessionFile =
             serde_json::from_str(r#"{"statusUpdatedAt":3,"updatedAt":2,"startedAt":1}"#).unwrap();
-        assert_eq!(file.status_set_at(), Some(3.0));
+        assert_eq!(file.status_set_at(), Some(3));
 
         let file: super::SessionFile = serde_json::from_str(r#"{"startedAt":1}"#).unwrap();
-        assert_eq!(file.status_set_at(), Some(1.0));
+        assert_eq!(file.status_set_at(), Some(1));
     }
 
     #[test]
     fn a_file_without_proc_start_is_not_live() {
         let file: super::SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
-        assert!(file.agent(0.0, "/home/you").is_none());
+        assert!(file.agent(0, "/home/you").is_none());
     }
 
     #[test]

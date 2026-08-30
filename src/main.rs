@@ -83,10 +83,13 @@ fn write_stdout(output: &str) -> std::io::Result<()> {
 }
 
 fn run() -> Result<String, String> {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "the system clock is before the epoch".to_string())?
-        .as_secs_f64();
+    let now_secs = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "the system clock is before the epoch".to_string())?
+            .as_secs(),
+    )
+    .map_err(|_| "the system clock is too far in the future".to_string())?;
 
     let home = home()?;
     let mut agents = collect(&sessions_dir(&home), now_secs, &home);
@@ -113,7 +116,7 @@ fn sessions_dir(home: &str) -> std::path::PathBuf {
 ///
 /// A file that this tool cannot read or parse is skipped without a message. Claude Code writes
 /// to this directory while this tool reads it, so an incomplete file is a normal event.
-fn collect(dir: &std::path::PathBuf, now_secs: f64, home: &str) -> Vec<agent::Agent> {
+fn collect(dir: &std::path::PathBuf, now_secs: i64, home: &str) -> Vec<agent::Agent> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -133,7 +136,7 @@ mod tests {
     fn a_missing_sessions_directory_yields_no_agents() {
         let agents = super::collect(
             &std::path::PathBuf::from("/nonexistent/claude/sessions"),
-            0.0,
+            0,
             "/home/you",
         );
         assert!(agents.is_empty());
