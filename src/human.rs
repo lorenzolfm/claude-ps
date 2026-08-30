@@ -25,20 +25,23 @@ pub fn table(agents: &[crate::agent::Agent], now_secs: i64, home: &str) -> Strin
 /// One cell for each column, in the order of [`HEADER`].
 type Row = [String; COLUMNS];
 
-const COLUMNS: usize = 7;
+const COLUMNS: usize = 8;
 
-const HEADER: [&str; COLUMNS] = ["NAME", "STATUS", "AGE", "ELAPSED", "CWD", "PID", "ZELLIJ"];
+const HEADER: [&str; COLUMNS] = [
+    "NAME", "STATUS", "AGE", "ELAPSED", "MODE", "CWD", "PID", "ZELLIJ",
+];
 
 /// The columns that hold a number or a duration. They are aligned to the right, so that the
 /// digits of one column are above each other and two agents compare by eye.
-const RIGHT_ALIGNED: [bool; COLUMNS] = [false, false, true, true, false, true, false];
+const RIGHT_ALIGNED: [bool; COLUMNS] = [false, false, true, true, false, false, true, false];
 
 fn row(agent: &crate::agent::Agent, now_secs: i64, home: &str) -> Row {
     [
-        text(agent.name.as_deref()),
+        name(agent),
         text(agent.status.as_deref()),
         duration(agent.status_age),
         elapsed(agent.session_started_at, now_secs),
+        text(agent.permission_mode.as_deref()),
         agent
             .cwd
             .as_deref()
@@ -54,6 +57,23 @@ fn row(agent: &crate::agent::Agent, now_secs: i64, home: &str) -> Row {
 /// that ended, and this tool prints the missing value of every key.
 fn missing() -> String {
     "-".to_string()
+}
+
+/// The name, and a `~` after a name that Claude derived rather than a person chose.
+///
+/// This table prints the cwd on every line, and a derived name is the basename of that cwd and
+/// a suffix. The mark says which names carry something the cwd does not.
+///
+/// Only `user` and `peer` are a chosen name. Every other source, the ones this tool does not
+/// know included, is machinery.
+fn name(agent: &crate::agent::Agent) -> String {
+    let Some(name) = agent.name.as_deref() else {
+        return missing();
+    };
+    match agent.name_source.as_deref() {
+        None | Some("user" | "peer") => name.to_string(),
+        Some(_) => format!("{name}~"),
+    }
 }
 
 fn text(value: Option<&str>) -> String {
@@ -178,10 +198,12 @@ mod tests {
                 pane: "1".into(),
             }),
             name: Some(name.into()),
+            name_source: Some("user".into()),
             pid,
             session_id: Some("abc-123".into()),
             session_started_at: 1_755_000_000,
             cwd: Some("/home/you/src".into()),
+            permission_mode: None,
         }
     }
 
@@ -199,12 +221,12 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "==========================================================",
-                " NAME           STATUS   AGE  ELAPSED  CWD     PID  ZELLIJ",
-                "==========================================================",
-                " a-longer-name  waiting  35s   1m 40s  ~/src     7  work:1",
-                " b              waiting  35s   1m 40s  ~/src  4242  work:1",
-                "==========================================================",
+                "================================================================",
+                " NAME           STATUS   AGE  ELAPSED  MODE  CWD     PID  ZELLIJ",
+                "================================================================",
+                " a-longer-name  waiting  35s   1m 40s  -     ~/src     7  work:1",
+                " b              waiting  35s   1m 40s  -     ~/src  4242  work:1",
+                "================================================================",
             ]
         );
         assert!(lines.iter().all(|line| !line.ends_with(' ')));
@@ -241,11 +263,50 @@ mod tests {
         one.zellij = None;
         one.cwd = None;
         one.session_started_at = 0;
+        one.permission_mode = None;
         let table = super::table(&[one], 1_755_000_100, "/home/you");
         assert_eq!(
             table.lines().nth(3).unwrap(),
-            " -     -       35s        -  -      1  -"
+            " -     -       35s        -  -     -      1  -"
         );
+    }
+
+    /// The table prints the cwd on every line, so a derived name repeats it. Only a name that
+    /// a person or a peer chose stands without the mark.
+    #[test]
+    fn a_derived_name_carries_a_mark_and_a_chosen_name_does_not() {
+        let marked = |source: Option<&str>| {
+            let mut one = agent("work-f8", 1);
+            one.name_source = source.map(str::to_string);
+            super::name(&one)
+        };
+
+        assert_eq!(marked(Some("user")), "work-f8");
+        assert_eq!(marked(Some("peer")), "work-f8");
+        assert_eq!(marked(None), "work-f8");
+
+        assert_eq!(marked(Some("derived")), "work-f8~");
+        assert_eq!(marked(Some("auto")), "work-f8~");
+        assert_eq!(marked(Some("collision")), "work-f8~");
+        assert_eq!(marked(Some("hook")), "work-f8~");
+        assert_eq!(marked(Some("somethingNew")), "work-f8~");
+    }
+
+    #[test]
+    fn an_agent_without_a_name_is_a_dash_and_never_a_lone_mark() {
+        let mut one = agent("x", 1);
+        one.name = None;
+        one.name_source = Some("derived".into());
+        assert_eq!(super::name(&one), "-");
+    }
+
+    #[test]
+    fn the_permission_mode_has_a_column() {
+        let mut one = agent("x", 1);
+        one.permission_mode = Some("bypassPermissions".into());
+        let table = super::table(&[one], 1_755_000_100, "/home/you");
+        assert!(table.contains("MODE"), "{table}");
+        assert!(table.contains("bypassPermissions"), "{table}");
     }
 
     #[test]

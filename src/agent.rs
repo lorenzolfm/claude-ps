@@ -11,12 +11,22 @@ pub struct SessionFile {
     /// Compared against `/proc/<pid>/stat` to find if the process is alive. Untyped, because
     /// Claude Code can write this value as a number or as a string.
     pub proc_start: Option<serde_json::Value>,
+    /// The machine and the pid namespace that [`SessionFile::pid`] is a name in, for example
+    /// `linux:b2ebdff1356e437dae8ff5f78c20e8ff:pid:[4026531836]`. Compared against this
+    /// machine before the pid is used at all.
+    pub pid_domain: Option<String>,
     /// Passed through verbatim. The vocabulary is open and changes with the version of Claude
     /// Code, so this tool does not compare the status against a known set of values.
     pub status: Option<String>,
     /// Claude's own label for the session, for example `zellij-f8`. This is the basename of the
     /// cwd and a suffix. It is not the zellij session name.
     pub name: Option<String>,
+    /// Who chose the name: `user`, `peer`, `derived`, `collision`, `auto`, or `hook`. Passed
+    /// through verbatim, and the vocabulary is open, like the status vocabulary.
+    ///
+    /// It says whether the name carries information. A `derived` name is the basename of the
+    /// cwd and a suffix, which a consumer that already shows the cwd shows twice.
+    pub name_source: Option<String>,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
     /// Epoch milliseconds. The first of these three fields that is present dates the status.
@@ -31,13 +41,35 @@ pub struct SessionFile {
 impl SessionFile {
     /// Whether the pid in this file is still the process that wrote the file.
     ///
-    /// Both conditions are necessary. Linux recycles pids, so a stale file can name a pid that
-    /// now belongs to a different process. The start time makes the check exact.
+    /// All three conditions are necessary. A pid is a name in one pid namespace on one machine,
+    /// so the domain has to agree before the pid means anything here. Linux then recycles pids,
+    /// so a stale file can name a pid that now belongs to a different process, and the start
+    /// time makes that check exact.
     fn is_live(&self, pid: u32) -> bool {
+        if !self.is_local() {
+            return false;
+        }
         let Some(recorded) = self.proc_start.as_ref().map(json_scalar) else {
             return false;
         };
         crate::proc::start_time(pid).is_some_and(|actual| actual == recorded)
+    }
+
+    /// Whether [`SessionFile::pid`] counts in the pid namespace of this process.
+    ///
+    /// A file that a container wrote, or that another machine wrote onto a shared home, names a
+    /// pid that belongs to a stranger here. `procStart` alone does not catch that: this tool
+    /// compares the start time of the stranger against a value it did not write, and two
+    /// processes that started in the same clock tick agree.
+    ///
+    /// A file without the key, and a machine that cannot say which domain it is, are both
+    /// accepted. Both are the state before this key existed, and hiding every agent is worse
+    /// than the collision this guards against.
+    fn is_local(&self) -> bool {
+        match (self.pid_domain.as_deref(), crate::proc::local_pid_domain()) {
+            (Some(recorded), Some(local)) => recorded == local,
+            _ => true,
+        }
     }
 
     /// Milliseconds since the epoch that the current status was set, if it is known at all.
@@ -58,10 +90,12 @@ impl SessionFile {
             status_age: status_age_secs(now_secs, self.status_set_at()),
             zellij: Zellij::of(pid),
             name: self.name.clone(),
+            name_source: self.name_source.clone(),
             pid,
             session_id: self.session_id.clone(),
             session_started_at: epoch_secs(self.started_at),
             cwd: self.cwd.clone(),
+            permission_mode: crate::proc::permission_mode(pid),
         })
     }
 }
@@ -128,10 +162,17 @@ pub struct Agent {
     pub status_age: u64,
     pub zellij: Option<Zellij>,
     pub name: Option<String>,
+    pub name_source: Option<String>,
     pub pid: u32,
     pub session_id: Option<String>,
     pub session_started_at: u64,
     pub cwd: Option<String>,
+    /// The permission mode that the command line of the agent asks for, and `None` for a
+    /// command line that does not ask for one.
+    ///
+    /// This is the launch of the agent, and not the mode it runs under now. The command line
+    /// of a process does not change, and a person cycles the mode during a session.
+    pub permission_mode: Option<String>,
 }
 
 #[cfg(test)]
@@ -145,10 +186,12 @@ mod tests {
                 pane: "1".into(),
             }),
             name: Some("work-f8".into()),
+            name_source: Some("user".into()),
             pid: 4242,
             session_id: Some("abc-123".into()),
             session_started_at: 1_755_000_000,
             cwd: Some("/home/you/src".into()),
+            permission_mode: Some("plan".into()),
         }
     }
 
@@ -157,7 +200,7 @@ mod tests {
         let json = serde_json::to_string(&agent()).unwrap();
         assert_eq!(
             json,
-            r#"{"status":"waiting","status_age":35,"zellij":{"session":"work","pane":"1"},"name":"work-f8","pid":4242,"session_id":"abc-123","session_started_at":1755000000,"cwd":"/home/you/src"}"#
+            r#"{"status":"waiting","status_age":35,"zellij":{"session":"work","pane":"1"},"name":"work-f8","name_source":"user","pid":4242,"session_id":"abc-123","session_started_at":1755000000,"cwd":"/home/you/src","permission_mode":"plan"}"#
         );
     }
 
@@ -250,5 +293,55 @@ mod tests {
     fn a_file_without_proc_start_is_not_live() {
         let file: super::SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
         assert!(file.agent(0).is_none());
+    }
+
+    /// The pid of a file from a container, or from another machine on a shared home, is a name
+    /// in a namespace that is not this one. It is never looked up here.
+    #[test]
+    fn a_pid_from_another_domain_is_not_local() {
+        let file: super::SessionFile =
+            serde_json::from_str(r#"{"pid":1,"pidDomain":"linux:0123:pid:[1]"}"#).unwrap();
+        assert!(!file.is_local());
+        assert!(file.agent(0).is_none());
+    }
+
+    /// The state before the key existed. Rejecting these files hides every agent of an older
+    /// Claude Code, which is worse than the collision the key guards against.
+    #[test]
+    fn a_file_without_a_domain_is_accepted() {
+        let file: super::SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
+        assert!(file.is_local());
+    }
+
+    #[test]
+    fn a_pid_from_this_domain_is_local() {
+        let Some(local) = crate::proc::local_pid_domain() else {
+            return;
+        };
+        let file: super::SessionFile =
+            serde_json::from_str(&format!(r#"{{"pid":1,"pidDomain":"{local}"}}"#)).unwrap();
+        assert!(file.is_local());
+    }
+
+    /// A `derived` name is the basename of the cwd and a suffix, and a `user` name is a label
+    /// that a person chose. A consumer that shows the cwd anyway needs the two apart.
+    #[test]
+    fn the_name_source_is_carried_through_verbatim() {
+        for source in [
+            "user",
+            "peer",
+            "derived",
+            "collision",
+            "auto",
+            "hook",
+            "somethingNew",
+        ] {
+            let file: super::SessionFile =
+                serde_json::from_str(&format!(r#"{{"nameSource":"{source}"}}"#)).unwrap();
+            assert_eq!(file.name_source.as_deref(), Some(source));
+        }
+
+        let file: super::SessionFile = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+        assert_eq!(file.name_source, None);
     }
 }

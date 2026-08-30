@@ -63,6 +63,76 @@ pub fn parse_environ(raw: &[u8]) -> (Option<String>, Option<String>) {
     (session, pane)
 }
 
+/// The pid domain of this machine, in the spelling Claude Code writes into `pidDomain`.
+///
+/// `linux:<machine id>:<pid namespace>`, for example
+/// `linux:b2ebdff1356e437dae8ff5f78c20e8ff:pid:[4026531836]`.
+///
+/// Read once. Neither half changes while this process runs, and every session file compares
+/// against the same value.
+pub fn local_pid_domain() -> Option<&'static str> {
+    static DOMAIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DOMAIN.get_or_init(read_pid_domain).as_deref()
+}
+
+fn read_pid_domain() -> Option<String> {
+    let machine = machine_id()?;
+    let namespace = std::fs::read_link("/proc/self/ns/pid").ok()?;
+    Some(format!("linux:{machine}:{}", namespace.to_string_lossy()))
+}
+
+/// The machine id, from the systemd path and then from the dbus path that older systems have.
+fn machine_id() -> Option<String> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+}
+
+/// The permission mode that the command line of the agent asks for, or `None` for a command
+/// line that does not ask for one.
+pub fn permission_mode(pid: u32) -> Option<String> {
+    let raw = std::fs::read(proc_path(pid, "cmdline")).ok()?;
+    parse_permission_mode(&raw)
+}
+
+/// `/proc/<pid>/cmdline` holds the arguments as NUL separated entries, like the environment.
+///
+/// Three spellings set the mode: `--permission-mode <mode>`, `--permission-mode=<mode>`, and
+/// `--dangerously-skip-permissions`.
+///
+/// The mode is passed through verbatim, and this parser compares it against no known set.
+/// Claude Code adds modes in new releases, for the same reason that it adds a status.
+///
+/// `--dangerously-skip-permissions` wins over an explicit mode. A command line that carries
+/// both contradicts itself, and the wider of the two is the one a person needs to see.
+///
+/// Entries are compared whole, and never as a prefix of the argument.
+/// `--allow-dangerously-skip-permissions` is a different flag, which permits the bypass and
+/// does not perform it.
+pub fn parse_permission_mode(raw: &[u8]) -> Option<String> {
+    const FLAG: &[u8] = b"--permission-mode";
+
+    let mut mode = None;
+    let mut args = raw.split(|byte| *byte == 0);
+    while let Some(arg) = args.next() {
+        if arg == b"--dangerously-skip-permissions" {
+            return Some("bypassPermissions".to_owned());
+        }
+        let value = if arg == FLAG {
+            args.next()
+        } else {
+            arg.strip_prefix(FLAG)
+                .and_then(|rest| rest.strip_prefix(b"="))
+        };
+        if let Some(value) = value {
+            mode = Some(String::from_utf8_lossy(value).into_owned());
+        }
+    }
+    mode.filter(|mode| !mode.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     /// Fields 3 to 21 of a real line, so the number of fields between the `)` and the start
@@ -116,6 +186,111 @@ mod tests {
         let raw = b"ZELLIJ_SESSION_NAME=bad\xffname\0";
         let (session, _) = super::parse_environ(raw);
         assert_eq!(session.as_deref(), Some("bad\u{fffd}name"));
+    }
+
+    #[test]
+    fn a_command_line_without_the_flag_asks_for_no_mode() {
+        assert_eq!(super::parse_permission_mode(b"claude\0--resume\0"), None);
+        assert_eq!(super::parse_permission_mode(b""), None);
+    }
+
+    #[test]
+    fn the_mode_is_read_from_both_spellings_of_the_flag() {
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0--permission-mode\0plan\0").as_deref(),
+            Some("plan")
+        );
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0--permission-mode=plan\0").as_deref(),
+            Some("plan")
+        );
+    }
+
+    #[test]
+    fn the_bypass_flag_is_a_mode() {
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0--dangerously-skip-permissions\0").as_deref(),
+            Some("bypassPermissions")
+        );
+    }
+
+    /// `--allow-dangerously-skip-permissions` permits the bypass and does not perform it. An
+    /// agent that carries it runs under the mode it asks for, and not under a bypass.
+    #[test]
+    fn the_flag_that_only_permits_the_bypass_is_not_the_bypass() {
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0--allow-dangerously-skip-permissions\0"),
+            None
+        );
+        assert_eq!(
+            super::parse_permission_mode(
+                b"claude\0--allow-dangerously-skip-permissions\0--permission-mode\0plan\0"
+            )
+            .as_deref(),
+            Some("plan")
+        );
+    }
+
+    #[test]
+    fn the_bypass_wins_over_a_narrower_mode_in_either_order() {
+        assert_eq!(
+            super::parse_permission_mode(
+                b"claude\0--permission-mode\0plan\0--dangerously-skip-permissions\0"
+            )
+            .as_deref(),
+            Some("bypassPermissions")
+        );
+        assert_eq!(
+            super::parse_permission_mode(
+                b"claude\0--dangerously-skip-permissions\0--permission-mode\0plan\0"
+            )
+            .as_deref(),
+            Some("bypassPermissions")
+        );
+    }
+
+    /// The mode vocabulary is open, like the status vocabulary.
+    #[test]
+    fn an_unknown_mode_passes_through() {
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0--permission-mode\0somethingNew\0").as_deref(),
+            Some("somethingNew")
+        );
+    }
+
+    #[test]
+    fn a_flag_without_a_value_asks_for_no_mode() {
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0--permission-mode"),
+            None
+        );
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0--permission-mode=\0"),
+            None
+        );
+    }
+
+    /// The last one wins, which is what a shell alias that appends a flag produces.
+    #[test]
+    fn the_last_mode_wins() {
+        assert_eq!(
+            super::parse_permission_mode(
+                b"claude\0--permission-mode\0plan\0--permission-mode\0acceptEdits\0"
+            )
+            .as_deref(),
+            Some("acceptEdits")
+        );
+    }
+
+    /// The two halves that this tool compares against a session file, so that a wrong shape
+    /// shows here and not as an agent that went missing.
+    #[test]
+    fn the_local_pid_domain_names_this_machine_and_this_namespace() {
+        let Some(domain) = super::local_pid_domain() else {
+            return;
+        };
+        assert!(domain.starts_with("linux:"), "{domain}");
+        assert!(domain.contains(":pid:["), "{domain}");
     }
 
     #[test]

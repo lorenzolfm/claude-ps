@@ -18,13 +18,23 @@ object per agent:
   status_age          whole seconds in that status
   zellij              {session, pane}, or null if the agent is not in zellij
   name                Claude's own label for the session
+  name_source         who chose the name (user, derived, ...), or null
   pid                 the process id
   session_id          Claude's session uuid, which is also the transcript name
   session_started_at  epoch seconds when the session started, or 0 if unknown
   cwd                 the working directory of the agent
+  permission_mode     the mode the command line asks for, or null
 
 The status vocabulary is open and changes with the version of Claude Code. Do
-not compare the status against a fixed set of values.
+not compare the status against a fixed set of values. The same holds for
+name_source and permission_mode.
+
+name_source says whether the name carries information. A derived name is the
+basename of the cwd and a suffix, so a consumer that shows the cwd shows it
+twice. Only user and peer are a name that somebody chose.
+
+permission_mode is the launch of the agent and not the mode it runs under now.
+A command line does not change, and a person cycles the mode during a session.
 
 status_age and session_started_at answer different questions. status_age is the
 time in the current status. session_started_at is the time when the session
@@ -38,7 +48,8 @@ The order is by pid. This order is for stable diffs. Sort the agents again to
 show them to a person.
 
 --format text prints a table for a person instead: one line for each agent, the
-timestamps as durations, and the home directory as ~. That table has no
+timestamps as durations, the home directory as ~, and a ~ after a name that
+Claude derived rather than a person chose. That table has no
 stability rule, and its order is by name. Read the JSON from a program."
 )]
 struct Cli {
