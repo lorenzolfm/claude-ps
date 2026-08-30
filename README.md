@@ -96,8 +96,7 @@ closes the pipe, which is what `head` does. It is 1 if `claude-ps` cannot write
 its output, for example when the disk is full, and the message goes to stderr.
 
 **The order is stable, and not presentational.** `claude-ps` sorts the agents by
-zellij session, then pane, then pid. Agents outside zellij come last. Sort the
-agents again if you show them to a person.
+pid. Sort the agents again if you show them to a person.
 
 ## Zellij support
 

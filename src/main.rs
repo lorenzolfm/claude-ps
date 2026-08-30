@@ -39,9 +39,8 @@ small status_age. Only session_started_at makes them different.
 Agents with a stale session file do not appear: the pid must be alive, and the
 start time of the process must agree with the session file.
 
-The order is by zellij session, then pane, then pid, with agents outside zellij
-last. This order is for stable diffs. Sort the agents again to show them to a
-person."
+The order is by pid. This order is for stable diffs. Sort the agents again to
+show them to a person."
 )]
 struct Cli {}
 
@@ -94,7 +93,10 @@ fn run() -> Result<String, String> {
 
     let home = home()?;
     let mut agents = collect(&sessions_dir(&home), now_secs, &home);
-    agents.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+
+    // A stable order, so that two runs give a small diff. The pid is unique and does not
+    // change while the agent runs.
+    agents.sort_by_key(|agent| agent.pid);
 
     // One key per line, so two runs one second apart give a small diff.
     let mut out = serde_json::to_string_pretty(&agents)

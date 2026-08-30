@@ -143,17 +143,6 @@ pub struct Agent {
     pub cwd: Option<String>,
 }
 
-impl Agent {
-    /// A stable order, and not an order for a person: two runs one second apart give a small
-    /// diff. Agents outside zellij sort last as a group.
-    pub fn sort_key(&self) -> (bool, &str, &str, u32) {
-        match &self.zellij {
-            Some(z) => (false, z.session.as_str(), z.pane.as_str(), self.pid),
-            None => (true, "", "", self.pid),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     fn agent() -> super::Agent {
@@ -274,22 +263,5 @@ mod tests {
     fn a_file_without_proc_start_is_not_live() {
         let file: super::SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
         assert!(file.agent(0, "/home/you").is_none());
-    }
-
-    #[test]
-    fn sort_key_orders_by_session_then_pane_then_pid() {
-        let mut a = agent();
-        a.zellij = Some(super::Zellij {
-            session: "alpha".into(),
-            pane: "1".into(),
-        });
-        assert!(a.sort_key() < agent().sort_key());
-    }
-
-    #[test]
-    fn agents_outside_zellij_sort_last() {
-        let mut outside = agent();
-        outside.zellij = None;
-        assert!(agent().sort_key() < outside.sort_key());
     }
 }
