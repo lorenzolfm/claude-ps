@@ -1,7 +1,7 @@
 # claude-ps
 
-`claude-ps` prints one line for each running Claude Code agent. Each line
-carries what the agent is doing and the zellij pane it is doing it in.
+`claude-ps` is `ps` for Claude Code. It prints every running agent as JSON, and
+joins each one to the zellij pane it is running in.
 
 ## The problem
 
@@ -16,32 +16,57 @@ The two halves share one thing: the process id. `claude-ps` joins them.
 
 ## Output
 
-One agent per line, TAB-separated, in a fixed column order:
+A JSON array on stdout, one object per agent.
 
-```
-status  age  session  pane  name  pid  session_id  started_at  cwd
-```
-
-| Column | Content |
+| Key | Content |
 |---|---|
 | `status` | whatever Claude reports, verbatim |
 | `age` | whole seconds spent in that status |
-| `session` | `ZELLIJ_SESSION_NAME`, or `-` if the agent is not in zellij |
-| `pane` | `ZELLIJ_PANE_ID`, or `-` likewise |
-| `name` | Claude's own derived name, **not** the zellij session name |
+| `zellij` | `{session, pane}`, or `null` if the agent is not in zellij |
+| `name` | Claude's own derived label, **not** the zellij session name |
 | `pid` | the process id, and the key the two halves are joined on |
 | `session_id` | Claude's session uuid, matching its transcript |
 | `started_at` | epoch **seconds** the session began, or `0` if unknown |
-| `cwd` | last, and the only field that may contain whitespace |
+| `cwd` | the agent's working directory |
 
 ```console
 $ claude-ps
-waiting	35	work	0	work-f8	3318865	b08aacbc-…	1755000000	/home/you/Projects/work
-idle	5238	notes	1	notes-e1	3132891	f8f9b7ea-…	1754913000	/home/you/notes
-busy	13	-	-	scratch-2c	3129839	52b7681e-…	1755004000	/home/you/scratch
+[
+  {
+    "status": "waiting",
+    "age": 35,
+    "zellij": { "session": "work", "pane": "0" },
+    "name": "work-f8",
+    "pid": 3318865,
+    "session_id": "b08aacbc-…",
+    "started_at": 1755000000,
+    "cwd": "/home/you/Projects/work"
+  },
+  {
+    "status": "busy",
+    "age": 13,
+    "zellij": null,
+    "name": "scratch-2c",
+    "pid": 3129839,
+    "session_id": "52b7681e-…",
+    "started_at": 1755004000,
+    "cwd": "/home/you/scratch"
+  }
+]
 ```
 
-The third agent is not in zellij, so both join columns are `-`.
+The second agent is not in zellij, so its join is `null`.
+
+**No agents is `[]`, never empty output.** A consumer deserialising this gets a
+document in both cases, so "nothing is running" is never a parse error.
+
+### `zellij` is one object, not two fields
+
+Attaching to a session and focusing a pane is a **single act** for a consumer,
+and a session without a pane is an address it cannot use. Nesting the pair makes
+the half-answer unrepresentable rather than merely discouraged — where two
+separate nullable fields would leave every consumer to check both and agree on
+what a mismatch meant.
 
 ### `age` and `started_at` are not the same question
 
@@ -76,8 +101,10 @@ the file says it did — field 22 of `/proc/<pid>/stat` against the file's
 
 ### The order is for diffing, not for reading
 
-Rows are sorted by session, then pane, then pid, so two runs a second apart
-diff cleanly. That is the only reason the order exists.
+Agents are sorted by session, then pane, then pid, with those outside zellij
+last as a group. That is the only reason the order exists — and it is why the
+output is pretty-printed rather than compact: one key per line means two runs a
+second apart differ in the lines that actually changed.
 
 Deciding what a human should see first is the consumer's job, and consumers
 disagree — a picker wants the agent that is waiting on you at the top, a status
@@ -89,18 +116,23 @@ If none of `statusUpdatedAt`, `updatedAt` or `startedAt` is present, the age is
 `0`.
 
 Reading a missing field as epoch-millisecond `0` is the obvious shortcut and it
-renders every row as roughly fifty-seven years old, which reads as data rather
-than as breakage. If Claude renames those fields, a column of `0s` is visibly
+renders every agent as roughly fifty-seven years old, which reads as data rather
+than as breakage. If Claude renames those fields, a column of `0`s is visibly
 wrong.
 
 ## Compatibility
 
-⚠️ **`started_at` was added in a way that breaks the column contract, deliberately.** It sits
-**before** `cwd`, because `cwd` has to stay last — it is the only field that may contain
-whitespace, which is what lets a consumer take it as the whole remainder of the line.
+⚠️ **The output was TAB-separated columns through `0.1.0`, and is JSON from here on.**
+There is no flag to get the old format back.
 
-So a consumer written against the previous eight columns reads `started_at` where it expects
-`cwd`. Update consumers and this tool together.
+Positional columns made every *additive* change breaking: consumers checked the field
+count exactly, so gaining `started_at` meant a picker that could not read a schema it
+otherwise understood perfectly. Named keys invert that. A consumer ignores keys it does
+not know, so a new one costs nothing and only a **removed or renamed** key is a hard
+failure — which is the polarity you want, because adding is the common case.
+
+Two other changes came with it: the `-` placeholder is gone in favour of `null`,
+and the two zellij fields are one nested object.
 
 ## Consumers
 
@@ -109,6 +141,9 @@ So a consumer written against the previous eight columns reads `started_at` wher
   pane. It cannot do this join itself: a zellij plugin's wasi sandbox preopens
   only `/host`, `/data`, `/cache` and `/tmp`, so neither `~/.claude/sessions`
   nor `/proc` is readable from inside it.
+- [claude-tray](https://github.com/lorenzolfm/claude-tray) — a system tray
+  applet showing which sessions are waiting on you. It could read the registry
+  itself and deliberately does not: one joiner, many consumers.
 
 ## Installation
 

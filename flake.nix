@@ -1,5 +1,5 @@
 {
-  description = "One line per running Claude Code agent, joined to its zellij pane";
+  description = "ps for Claude Code, joined to the zellij pane each agent runs in";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -53,7 +53,7 @@
             doCheck = false;
 
             meta = {
-              description = "One line per running Claude Code agent, joined to its zellij pane";
+              description = "ps for Claude Code, joined to the zellij pane each agent runs in";
               homepage = "https://github.com/lorenzolfm/claude-ps";
               license = pkgs.lib.licenses.mit;
               mainProgram = "claude-ps";
