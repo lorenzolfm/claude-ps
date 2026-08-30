@@ -24,7 +24,7 @@ pub struct SessionFile {
     pub updated_at: Option<i64>,
     /// Epoch milliseconds when the session started. It dates the status as a last resort, and it
     /// is also an output key: a new session and a session that completed a turn are both `idle`
-    /// with a small age, and only this field makes them different.
+    /// with a small `status_age`, and only this field makes them different.
     pub started_at: Option<i64>,
 }
 
@@ -55,7 +55,7 @@ impl SessionFile {
         }
         Some(Agent {
             status: self.status.clone(),
-            age: age_secs(now_secs, self.status_set_at()),
+            status_age: status_age_secs(now_secs, self.status_set_at()),
             // Needs the cwd and the session id. This join is a guess and not a proof.
             // See `transcript`.
             context: match (self.cwd.as_deref(), self.session_id.as_deref()) {
@@ -68,7 +68,7 @@ impl SessionFile {
             name: self.name.clone(),
             pid,
             session_id: self.session_id.clone(),
-            started_at: epoch_secs(self.started_at),
+            session_started_at: epoch_secs(self.started_at),
             cwd: self.cwd.clone(),
         })
     }
@@ -86,10 +86,10 @@ fn json_scalar(value: &serde_json::Value) -> String {
 
 /// Whole seconds in the current status.
 ///
-/// An unknown timestamp gives an age of `0`. A missing field read as epoch millisecond `0` would
-/// show every agent with an age of approximately 57 years, which looks like data and not like a
-/// fault.
-pub fn age_secs(now_secs: i64, status_set_at_ms: Option<i64>) -> u64 {
+/// An unknown timestamp gives a status age of `0`. A missing field read as epoch millisecond `0`
+/// would show every agent in its status for approximately 57 years, which looks like data and not
+/// like a fault.
+pub fn status_age_secs(now_secs: i64, status_set_at_ms: Option<i64>) -> u64 {
     let Some(set_at_ms) = status_set_at_ms else {
         return 0;
     };
@@ -99,8 +99,8 @@ pub fn age_secs(now_secs: i64, status_set_at_ms: Option<i64>) -> u64 {
 
 /// Epoch seconds for a timestamp that Claude Code writes in milliseconds.
 ///
-/// An absent timestamp gives `0`, for the same reason as [`age_secs`]. A consumer that hides new
-/// sessions then computes a very large age, so it hides nothing.
+/// An absent timestamp gives `0`, for the same reason as [`status_age_secs`]. A consumer that
+/// hides new sessions then computes a very large session age, so it hides nothing.
 pub fn epoch_secs(ms: Option<i64>) -> u64 {
     let Some(ms) = ms else {
         return 0;
@@ -129,31 +129,17 @@ impl Zellij {
     }
 }
 
-/// One agent, as one JSON object.
-///
-/// The order of the fields is the order of the keys in the output: what the agent does, then for
-/// how long, then where it is. Consumers address the keys by name.
+/// Agent information that is printed to stdout.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
-    /// Verbatim from Claude Code. `null` only if the file has no status.
     pub status: Option<String>,
-    /// Whole seconds in the current status.
-    pub age: u64,
-    /// The tokens that the session carried at its last assistant turn, or `null` if the
-    /// transcript is not found or holds no assistant turn.
-    ///
-    /// Tokens only, and no percentage: Claude Code does not write the size of the context
-    /// window to disk.
+    pub status_age: u64,
     pub context: Option<crate::transcript::Context>,
-    /// `null` if the agent is not in zellij. This is a normal state and not a fault.
     pub zellij: Option<Zellij>,
-    /// Claude's own label for the session. This is not the zellij session name.
     pub name: Option<String>,
     pub pid: u32,
     pub session_id: Option<String>,
-    /// Epoch seconds when the session started. This is an absolute time, where `age` is a
-    /// duration, so the value does not become stale before a consumer uses it.
-    pub started_at: u64,
+    pub session_started_at: u64,
     pub cwd: Option<String>,
 }
 
@@ -173,7 +159,7 @@ mod tests {
     fn agent() -> super::Agent {
         super::Agent {
             status: Some("waiting".into()),
-            age: 35,
+            status_age: 35,
             context: Some(crate::transcript::Context {
                 tokens: 187_953,
                 as_of: 1_788_052_221,
@@ -185,7 +171,7 @@ mod tests {
             name: Some("work-f8".into()),
             pid: 4242,
             session_id: Some("abc-123".into()),
-            started_at: 1_755_000_000,
+            session_started_at: 1_755_000_000,
             cwd: Some("/home/you/src".into()),
         }
     }
@@ -195,7 +181,7 @@ mod tests {
         let json = serde_json::to_string(&agent()).unwrap();
         assert_eq!(
             json,
-            r#"{"status":"waiting","age":35,"context":{"tokens":187953,"as_of":1788052221},"zellij":{"session":"work","pane":"1"},"name":"work-f8","pid":4242,"session_id":"abc-123","started_at":1755000000,"cwd":"/home/you/src"}"#
+            r#"{"status":"waiting","status_age":35,"context":{"tokens":187953,"as_of":1788052221},"zellij":{"session":"work","pane":"1"},"name":"work-f8","pid":4242,"session_id":"abc-123","session_started_at":1755000000,"cwd":"/home/you/src"}"#
         );
     }
 
@@ -216,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn started_at_separates_a_newborn_from_a_finished_turn() {
+    fn the_session_start_separates_a_newborn_from_a_finished_turn() {
         let newborn: super::SessionFile =
             serde_json::from_str(r#"{"startedAt":1755000000000,"statusUpdatedAt":1755000002000}"#)
                 .unwrap();
@@ -224,10 +210,10 @@ mod tests {
             serde_json::from_str(r#"{"startedAt":1754000000000,"statusUpdatedAt":1755000002000}"#)
                 .unwrap();
 
-        // Identical from `age` alone -- the only thing a consumer had before this key.
+        // Identical from `status_age` alone -- the only thing a consumer had before this key.
         assert_eq!(
-            super::age_secs(1_755_000_012, newborn.status_set_at()),
-            super::age_secs(1_755_000_012, finished.status_set_at())
+            super::status_age_secs(1_755_000_012, newborn.status_set_at()),
+            super::status_age_secs(1_755_000_012, finished.status_set_at())
         );
 
         // Separable once the launch time is carried too.
@@ -236,25 +222,25 @@ mod tests {
     }
 
     #[test]
-    fn an_undated_start_is_zero_not_now() {
+    fn an_undated_session_start_is_zero_not_now() {
         assert_eq!(super::epoch_secs(None), 0);
         assert_eq!(super::epoch_secs(Some(-1)), 0);
         assert_eq!(super::epoch_secs(Some(1_755_000_000_999)), 1_755_000_000);
     }
 
     #[test]
-    fn age_is_whole_seconds_since_the_status_was_set() {
-        assert_eq!(super::age_secs(1_000, Some(940_500)), 59);
+    fn the_status_age_is_whole_seconds_since_the_status_was_set() {
+        assert_eq!(super::status_age_secs(1_000, Some(940_500)), 59);
     }
 
     #[test]
-    fn age_clamps_a_future_timestamp_to_zero() {
-        assert_eq!(super::age_secs(1_000, Some(9_999_000)), 0);
+    fn the_status_age_clamps_a_future_timestamp_to_zero() {
+        assert_eq!(super::status_age_secs(1_000, Some(9_999_000)), 0);
     }
 
     #[test]
-    fn age_of_an_undated_status_is_zero_not_the_epoch() {
-        assert_eq!(super::age_secs(1_755_000_000, None), 0);
+    fn the_status_age_of_an_undated_status_is_zero_not_the_epoch() {
+        assert_eq!(super::status_age_secs(1_755_000_000, None), 0);
     }
 
     #[test]

@@ -14,15 +14,15 @@ use std::io::Write;
 ps for Claude Code. Prints all running agents as a JSON array on stdout, one
 object per agent:
 
-  status      what Claude reports, verbatim (busy, idle, waiting, shell, ...)
-  age         whole seconds in that status
-  context     {tokens, as_of} at the last assistant turn, or null
-  zellij      {session, pane}, or null if the agent is not in zellij
-  name        Claude's own label for the session
-  pid         the process id
-  session_id  Claude's session uuid, which is also the transcript name
-  started_at  epoch seconds when the session started, or 0 if unknown
-  cwd         the working directory of the agent
+  status              what Claude reports, verbatim (busy, idle, waiting, ...)
+  status_age          whole seconds in that status
+  context             {tokens, as_of} at the last assistant turn, or null
+  zellij              {session, pane}, or null if the agent is not in zellij
+  name                Claude's own label for the session
+  pid                 the process id
+  session_id          Claude's session uuid, which is also the transcript name
+  session_started_at  epoch seconds when the session started, or 0 if unknown
+  cwd                 the working directory of the agent
 
 The status vocabulary is open and changes with the version of Claude Code. Do
 not compare the status against a fixed set of values.
@@ -31,9 +31,10 @@ context is a token count, and not a percentage: Claude Code does not write the
 size of the context window to disk. The as_of stamp gives the time of the last
 completed assistant turn.
 
-age and started_at answer different questions. A new session and a session that
-completed a turn are both idle with a small age. Only started_at makes them
-different.
+status_age and session_started_at answer different questions. status_age is the
+time in the current status. session_started_at is the time when the session
+started. A new session and a session that completed a turn are both idle with a
+small status_age. Only session_started_at makes them different.
 
 Agents with a stale session file do not appear: the pid must be alive, and the
 start time of the process must agree with the session file.
