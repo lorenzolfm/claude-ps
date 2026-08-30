@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::proc;
+use crate::transcript::{self, Context};
 
 /// `~/.claude/sessions/<pid>.json`, as much of it as this tool reads.
 ///
@@ -59,7 +60,7 @@ impl SessionFile {
     }
 
     /// The agent for this file, or `None` if the process behind it is gone.
-    pub fn agent(&self, now_secs: f64) -> Option<Agent> {
+    pub fn agent(&self, now_secs: f64, home: &str) -> Option<Agent> {
         let pid = self.pid?;
         if !self.is_live(pid) {
             return None;
@@ -67,6 +68,12 @@ impl SessionFile {
         Some(Agent {
             status: self.status.clone(),
             age: age_secs(now_secs, self.status_set_at()),
+            // Needs both halves of the path, and gives up quietly without them. This is the
+            // one join here that is a guess rather than a proof -- see `transcript`.
+            context: match (self.cwd.as_deref(), self.session_id.as_deref()) {
+                (Some(cwd), Some(session_id)) => transcript::context_of(home, cwd, session_id),
+                _ => None,
+            },
             zellij: Zellij::of(pid),
             name: self.name.clone(),
             pid,
@@ -157,6 +164,13 @@ pub struct Agent {
     pub status: Option<String>,
     /// Whole seconds in the current status.
     pub age: u64,
+    /// How many tokens the session was carrying at its last assistant turn, or `null` when the
+    /// transcript could not be found or held no turn.
+    ///
+    /// ⚠️ Tokens only — there is deliberately no percentage. The window size is never written
+    /// to disk, so a denominator here would have to come from a model-name table that goes
+    /// confidently wrong the day a new model ships. The consumer owns that decision.
+    pub context: Option<Context>,
     /// `null` when the agent is not inside zellij, which is an ordinary state and not a fault.
     pub zellij: Option<Zellij>,
     /// Claude's own derived label, **not** the zellij session name.
@@ -192,6 +206,10 @@ mod tests {
         Agent {
             status: Some("waiting".into()),
             age: 35,
+            context: Some(Context {
+                tokens: 187_953,
+                as_of: 1_788_052_221,
+            }),
             zellij: Some(Zellij {
                 session: "work".into(),
                 pane: "1".into(),
@@ -209,7 +227,7 @@ mod tests {
         let json = serde_json::to_string(&agent()).unwrap();
         assert_eq!(
             json,
-            r#"{"status":"waiting","age":35,"zellij":{"session":"work","pane":"1"},"name":"work-f8","pid":4242,"session_id":"abc-123","started_at":1755000000,"cwd":"/home/you/src"}"#
+            r#"{"status":"waiting","age":35,"context":{"tokens":187953,"as_of":1788052221},"zellij":{"session":"work","pane":"1"},"name":"work-f8","pid":4242,"session_id":"abc-123","started_at":1755000000,"cwd":"/home/you/src"}"#
         );
     }
 
@@ -317,7 +335,7 @@ mod tests {
     #[test]
     fn a_file_without_proc_start_is_not_live() {
         let file: SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
-        assert!(file.agent(0.0).is_none());
+        assert!(file.agent(0.0, "/home/you").is_none());
     }
 
     #[test]

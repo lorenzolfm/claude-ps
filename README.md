@@ -22,6 +22,7 @@ A JSON array on stdout, one object per agent.
 |---|---|
 | `status` | whatever Claude reports, verbatim |
 | `age` | whole seconds spent in that status |
+| `context` | `{tokens, as_of}` the session was carrying at its last assistant turn, or `null` |
 | `zellij` | `{session, pane}`, or `null` if the agent is not in zellij |
 | `name` | Claude's own derived label, **not** the zellij session name |
 | `pid` | the process id, and the key the two halves are joined on |
@@ -35,6 +36,7 @@ $ claude-ps
   {
     "status": "waiting",
     "age": 35,
+    "context": { "tokens": 187953, "as_of": 1788052221 },
     "zellij": { "session": "work", "pane": "0" },
     "name": "work-f8",
     "pid": 3318865,
@@ -45,6 +47,7 @@ $ claude-ps
   {
     "status": "busy",
     "age": 13,
+    "context": null,
     "zellij": null,
     "name": "scratch-2c",
     "pid": 3129839,
@@ -67,6 +70,35 @@ and a session without a pane is an address it cannot use. Nesting the pair makes
 the half-answer unrepresentable rather than merely discouraged — where two
 separate nullable fields would leave every consumer to check both and agree on
 what a mismatch meant.
+
+### `context` is a numerator, and only a numerator
+
+🔴 **There is no percentage here, and that is not an omission.**
+
+The context window *size* is never written to disk. Claude Code computes it and hands it to a
+status line at render time, along with the rate-limit windows — all of it in memory, none of it
+in a file this tool can read. The only way to a percentage would be a table keyed on model name,
+which would then be confidently wrong the first time a model ships that the table predates.
+
+That is the same failure the open status vocabulary is passed through untouched to avoid, and it
+is worse here: an unrecognised status renders as itself, while a wrong denominator renders as a
+number that looks right. So `claude-ps` reports what it can prove and leaves the denominator to
+whoever wants one.
+
+⚠️ `as_of` is not decoration. The count is measured at the last **completed** assistant turn, so
+a session that is `busy` right now has been growing its context since — which is exactly when
+someone is looking. The stamp is how a consumer tells a fresh number from a stale one.
+
+### The transcript join is a guess; the pid join is a proof
+
+Everything else here is joined on a pid and its start time, which cannot be wrong. `context`
+is joined by deriving a path from `cwd`, and Claude Code builds that path by replacing both `/`
+**and** `.` with `-` — which is not injective, so `/home/x/.config` and `/home/x-config` land in
+the same directory.
+
+It costs one key when it is wrong rather than a whole agent, and it is `null` when the file is
+not there. It is kept in its own module for the same reason it is described in its own section:
+it is the one thing here that is not exact.
 
 ### `age` and `started_at` are not the same question
 

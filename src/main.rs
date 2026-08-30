@@ -7,6 +7,7 @@
 
 mod agent;
 mod proc;
+mod transcript;
 
 use std::fs;
 use std::io::{self, Write};
@@ -32,6 +33,7 @@ Output is a JSON array on stdout, one object per agent:
 
   status      whatever Claude reports, verbatim (busy, idle, waiting, shell, ...)
   age         whole seconds spent in that status
+  context     {tokens, as_of} at the last assistant turn, or null
   zellij      {session, pane}, or null when the agent is not inside zellij
   name        Claude's own derived label, NOT the zellij session name
   pid         the process id, and the key the two halves are joined on
@@ -45,6 +47,12 @@ idle with a small age; only the launch time tells them apart.
 
 The status vocabulary is open and moves with Claude Code's version, so it is
 passed through untouched. Do not match it against a fixed set.
+
+context is tokens only, never a percentage: the window size is not written to
+disk anywhere, so a denominator would have to come from a model-name table that
+goes confidently wrong the day a new model ships. It is also the one inexact
+join here -- the transcript path is derived from cwd -- so it is null rather
+than a guess when the file is not found.
 
 Agents are ordered by session, then pane, then pid, with those outside zellij
 last. That is for stable diffs between runs, not for display: ordering for a
@@ -81,7 +89,8 @@ fn run() -> Result<String, String> {
         .map_err(|_| "the system clock is before the epoch".to_string())?
         .as_secs_f64();
 
-    let mut agents = collect(&sessions_dir()?, now_secs);
+    let home = home()?;
+    let mut agents = collect(&sessions_dir(&home), now_secs, &home);
     agents.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
 
     // Pretty rather than compact, and that is a choice about diffing as much as about reading:
@@ -93,9 +102,12 @@ fn run() -> Result<String, String> {
     Ok(out)
 }
 
-fn sessions_dir() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".claude").join("sessions"))
+fn home() -> Result<String, String> {
+    std::env::var("HOME").map_err(|_| "HOME is not set".to_string())
+}
+
+fn sessions_dir(home: &str) -> PathBuf {
+    PathBuf::from(home).join(".claude").join("sessions")
 }
 
 /// Every readable session file that still has a live agent behind it.
@@ -104,7 +116,7 @@ fn sessions_dir() -> Result<PathBuf, String> {
 /// directory is written by another program while this one reads it, so a half-written file is
 /// an ordinary event rather than a fault — and the caller is usually a status bar or a picker,
 /// which cannot do anything useful with a complaint about one file.
-fn collect(dir: &PathBuf, now_secs: f64) -> Vec<Agent> {
+fn collect(dir: &PathBuf, now_secs: f64, home: &str) -> Vec<Agent> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -114,7 +126,7 @@ fn collect(dir: &PathBuf, now_secs: f64) -> Vec<Agent> {
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         .filter_map(|path| fs::read_to_string(&path).ok())
         .filter_map(|text| serde_json::from_str::<SessionFile>(&text).ok())
-        .filter_map(|file| file.agent(now_secs))
+        .filter_map(|file| file.agent(now_secs, home))
         .collect()
 }
 
@@ -126,7 +138,11 @@ mod tests {
     /// has never run Claude Code looks like.
     #[test]
     fn a_missing_sessions_directory_yields_no_agents() {
-        let agents = collect(&PathBuf::from("/nonexistent/claude/sessions"), 0.0);
+        let agents = collect(
+            &PathBuf::from("/nonexistent/claude/sessions"),
+            0.0,
+            "/home/you",
+        );
         assert!(agents.is_empty());
     }
 
