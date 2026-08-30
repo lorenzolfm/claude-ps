@@ -1,6 +1,5 @@
 mod agent;
 mod proc;
-mod transcript;
 
 use clap::Parser;
 use std::io::Write;
@@ -16,7 +15,6 @@ object per agent:
 
   status              what Claude reports, verbatim (busy, idle, waiting, ...)
   status_age          whole seconds in that status
-  context             {tokens, as_of} at the last assistant turn, or null
   zellij              {session, pane}, or null if the agent is not in zellij
   name                Claude's own label for the session
   pid                 the process id
@@ -26,10 +24,6 @@ object per agent:
 
 The status vocabulary is open and changes with the version of Claude Code. Do
 not compare the status against a fixed set of values.
-
-context is a token count, and not a percentage: Claude Code does not write the
-size of the context window to disk. The as_of stamp gives the time of the last
-completed assistant turn.
 
 status_age and session_started_at answer different questions. status_age is the
 time in the current status. session_started_at is the time when the session
@@ -92,7 +86,7 @@ fn run() -> Result<String, String> {
     .map_err(|_| "the system clock is too far in the future".to_string())?;
 
     let home = home()?;
-    let mut agents = collect(&sessions_dir(&home), now_secs, &home);
+    let mut agents = collect(&sessions_dir(&home), now_secs);
 
     // A stable order, so that two runs give a small diff. The pid is unique and does not
     // change while the agent runs.
@@ -119,7 +113,7 @@ fn sessions_dir(home: &str) -> std::path::PathBuf {
 ///
 /// A file that this tool cannot read or parse is skipped without a message. Claude Code writes
 /// to this directory while this tool reads it, so an incomplete file is a normal event.
-fn collect(dir: &std::path::PathBuf, now_secs: i64, home: &str) -> Vec<agent::Agent> {
+fn collect(dir: &std::path::PathBuf, now_secs: i64) -> Vec<agent::Agent> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -129,7 +123,7 @@ fn collect(dir: &std::path::PathBuf, now_secs: i64, home: &str) -> Vec<agent::Ag
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         .filter_map(|path| std::fs::read_to_string(&path).ok())
         .filter_map(|text| serde_json::from_str::<agent::SessionFile>(&text).ok())
-        .filter_map(|file| file.agent(now_secs, home))
+        .filter_map(|file| file.agent(now_secs))
         .collect()
 }
 
@@ -137,11 +131,7 @@ fn collect(dir: &std::path::PathBuf, now_secs: i64, home: &str) -> Vec<agent::Ag
 mod tests {
     #[test]
     fn a_missing_sessions_directory_yields_no_agents() {
-        let agents = super::collect(
-            &std::path::PathBuf::from("/nonexistent/claude/sessions"),
-            0,
-            "/home/you",
-        );
+        let agents = super::collect(&std::path::PathBuf::from("/nonexistent/claude/sessions"), 0);
         assert!(agents.is_empty());
     }
 

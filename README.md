@@ -30,7 +30,6 @@ There is no procfs on darwin, so the flake does not build for darwin.
 |---|---|
 | `status` | What Claude reports, verbatim |
 | `status_age` | Whole seconds in that status |
-| `context` | `{tokens, as_of}` at the last assistant turn, or `null` |
 | `zellij` | `{session, pane}`, or `null` if the agent is not in zellij |
 | `name` | Claude's own label for the session |
 | `pid` | The process id |
@@ -44,7 +43,6 @@ $ claude-ps
   {
     "status": "waiting",
     "status_age": 35,
-    "context": { "tokens": 187953, "as_of": 1788052221 },
     "zellij": { "session": "work", "pane": "0" },
     "name": "work-f8",
     "pid": 3318865,
@@ -55,7 +53,6 @@ $ claude-ps
   {
     "status": "busy",
     "status_age": 13,
-    "context": null,
     "zellij": null,
     "name": "scratch-2c",
     "pid": 3129839,
@@ -72,11 +69,6 @@ $ claude-ps
 `claude-ps` passes the status through without a change. Do not compare the
 status against a fixed set of values. A consumer that shows only the values it
 knows hides live agents.
-
-**`context` is a token count, and not a percentage.** Claude Code does not write
-the size of the context window to disk. `claude-ps` reports only the number of
-tokens. The `as_of` stamp gives the time of the last completed assistant turn.
-An agent that is `busy` has added tokens after that time.
 
 **`status_age` and `session_started_at` answer different questions.**
 `status_age` is the time in the current status. `session_started_at` is the time

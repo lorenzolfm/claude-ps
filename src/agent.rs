@@ -48,7 +48,7 @@ impl SessionFile {
     }
 
     /// The agent for this file, or `None` if the process behind it is gone.
-    pub fn agent(&self, now_secs: i64, home: &str) -> Option<Agent> {
+    pub fn agent(&self, now_secs: i64) -> Option<Agent> {
         let pid = self.pid?;
         if !self.is_live(pid) {
             return None;
@@ -56,14 +56,6 @@ impl SessionFile {
         Some(Agent {
             status: self.status.clone(),
             status_age: status_age_secs(now_secs, self.status_set_at()),
-            // Needs the cwd and the session id. This join is a guess and not a proof.
-            // See `transcript`.
-            context: match (self.cwd.as_deref(), self.session_id.as_deref()) {
-                (Some(cwd), Some(session_id)) => {
-                    crate::transcript::context_of(home, cwd, session_id)
-                }
-                _ => None,
-            },
             zellij: Zellij::of(pid),
             name: self.name.clone(),
             pid,
@@ -134,7 +126,6 @@ impl Zellij {
 pub struct Agent {
     pub status: Option<String>,
     pub status_age: u64,
-    pub context: Option<crate::transcript::Context>,
     pub zellij: Option<Zellij>,
     pub name: Option<String>,
     pub pid: u32,
@@ -149,10 +140,6 @@ mod tests {
         super::Agent {
             status: Some("waiting".into()),
             status_age: 35,
-            context: Some(crate::transcript::Context {
-                tokens: 187_953,
-                as_of: 1_788_052_221,
-            }),
             zellij: Some(super::Zellij {
                 session: "work".into(),
                 pane: "1".into(),
@@ -170,7 +157,7 @@ mod tests {
         let json = serde_json::to_string(&agent()).unwrap();
         assert_eq!(
             json,
-            r#"{"status":"waiting","status_age":35,"context":{"tokens":187953,"as_of":1788052221},"zellij":{"session":"work","pane":"1"},"name":"work-f8","pid":4242,"session_id":"abc-123","session_started_at":1755000000,"cwd":"/home/you/src"}"#
+            r#"{"status":"waiting","status_age":35,"zellij":{"session":"work","pane":"1"},"name":"work-f8","pid":4242,"session_id":"abc-123","session_started_at":1755000000,"cwd":"/home/you/src"}"#
         );
     }
 
@@ -262,6 +249,6 @@ mod tests {
     #[test]
     fn a_file_without_proc_start_is_not_live() {
         let file: super::SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
-        assert!(file.agent(0, "/home/you").is_none());
+        assert!(file.agent(0).is_none());
     }
 }
