@@ -66,10 +66,7 @@ impl SessionFile {
     /// accepted. Both are the state before this key existed, and hiding every agent is worse
     /// than the collision this guards against.
     fn is_local(&self) -> bool {
-        match (self.pid_domain.as_deref(), crate::proc::local_pid_domain()) {
-            (Some(recorded), Some(local)) => recorded == local,
-            _ => true,
-        }
+        is_local_domain(self.pid_domain.as_deref(), crate::proc::local_pid_domain())
     }
 
     /// Milliseconds since the epoch that the current status was set, if it is known at all.
@@ -97,6 +94,17 @@ impl SessionFile {
             cwd: self.cwd.clone(),
             permission_mode: crate::proc::permission_mode(pid),
         })
+    }
+}
+
+/// Whether a recorded pid domain is the domain of this process.
+///
+/// The two reads of the environment are arguments, so that the decision is testable on a machine
+/// that cannot say which domain it is. A build sandbox without an `/etc/machine-id` is one.
+fn is_local_domain(recorded: Option<&str>, local: Option<&str>) -> bool {
+    match (recorded, local) {
+        (Some(recorded), Some(local)) => recorded == local,
+        _ => true,
     }
 }
 
@@ -299,28 +307,34 @@ mod tests {
     /// in a namespace that is not this one. It is never looked up here.
     #[test]
     fn a_pid_from_another_domain_is_not_local() {
-        let file: super::SessionFile =
-            serde_json::from_str(r#"{"pid":1,"pidDomain":"linux:0123:pid:[1]"}"#).unwrap();
-        assert!(!file.is_local());
-        assert!(file.agent(0).is_none());
+        assert!(!super::is_local_domain(
+            Some("linux:0123:pid:[1]"),
+            Some("linux:4567:pid:[4026531836]")
+        ));
+    }
+
+    #[test]
+    fn a_pid_from_this_domain_is_local() {
+        let domain = "linux:0123:pid:[4026531836]";
+        assert!(super::is_local_domain(Some(domain), Some(domain)));
     }
 
     /// The state before the key existed. Rejecting these files hides every agent of an older
     /// Claude Code, which is worse than the collision the key guards against.
     #[test]
     fn a_file_without_a_domain_is_accepted() {
+        assert!(super::is_local_domain(None, Some("linux:0123:pid:[1]")));
+
         let file: super::SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
         assert!(file.is_local());
     }
 
+    /// A build sandbox without an `/etc/machine-id` is such a machine, and every agent of a
+    /// person who runs the tool there would go away.
     #[test]
-    fn a_pid_from_this_domain_is_local() {
-        let Some(local) = crate::proc::local_pid_domain() else {
-            return;
-        };
-        let file: super::SessionFile =
-            serde_json::from_str(&format!(r#"{{"pid":1,"pidDomain":"{local}"}}"#)).unwrap();
-        assert!(file.is_local());
+    fn a_machine_that_cannot_say_its_domain_accepts_every_file() {
+        assert!(super::is_local_domain(Some("linux:0123:pid:[1]"), None));
+        assert!(super::is_local_domain(None, None));
     }
 
     /// A `derived` name is the basename of the cwd and a suffix, and a `user` name is a label
