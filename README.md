@@ -90,6 +90,10 @@ runs.
 agent stops. `claude-ps` shows an agent only if the pid is alive and the start
 time of the process agrees with the session file.
 
+**The exit status is 0 after a successful write.** It is also 0 if the reader
+closes the pipe, which is what `head` does. It is 1 if `claude-ps` cannot write
+its output, for example when the disk is full, and the message goes to stderr.
+
 **The order is stable, and not presentational.** `claude-ps` sorts the agents by
 zellij session, then pane, then pid. Agents outside zellij come last. Sort the
 agents again if you show them to a person.

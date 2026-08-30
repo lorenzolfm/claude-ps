@@ -2,9 +2,8 @@ mod agent;
 mod proc;
 mod transcript;
 
-use std::io::Write;
-
 use clap::Parser;
+use std::io::Write;
 
 #[derive(clap::Parser)]
 #[command(
@@ -49,20 +48,38 @@ fn main() -> std::process::ExitCode {
     Cli::parse();
 
     match run() {
-        Ok(output) => {
-            // One call, so a consumer that reads this on a timer sees a full document or
-            // nothing.
-            if std::io::stdout().write_all(output.as_bytes()).is_err() {
-                // A closed pipe is what `| head` looks like here. It is not an error.
-                return std::process::ExitCode::SUCCESS;
+        Ok(output) => match write_stdout(&output) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            // The reader closed the pipe, which is what `| head` does. The reader has the
+            // data it wants, so this tool did not fail.
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                std::process::ExitCode::SUCCESS
             }
-            std::process::ExitCode::SUCCESS
-        }
+            // All other write errors are real. A full disk during `claude-ps > agents.json`
+            // gives a truncated file, and the caller must hear about it.
+            Err(error) => {
+                eprintln!("claude-ps: could not write to stdout: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         Err(error) => {
             eprintln!("claude-ps: {error}");
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Write the document to stdout, then flush it.
+///
+/// One call for the full document, so a consumer that reads this on a timer sees all of it or
+/// none of it.
+///
+/// The flush is explicit. `Stdout` is line buffered, so a write can report success and the
+/// flush that follows can still fail. The runtime flushes at exit and discards that error.
+fn write_stdout(output: &str) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout();
+    stdout.write_all(output.as_bytes())?;
+    stdout.flush()
 }
 
 fn run() -> Result<String, String> {
