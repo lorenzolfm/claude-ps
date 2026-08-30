@@ -2,17 +2,11 @@ mod agent;
 mod proc;
 mod transcript;
 
-use std::fs;
-use std::io::{self, Write};
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::Write;
 
 use clap::Parser;
 
-use agent::{Agent, SessionFile};
-
-#[derive(Parser)]
+#[derive(clap::Parser)]
 #[command(
     name = "claude-ps",
     version,
@@ -51,28 +45,29 @@ person."
 )]
 struct Cli {}
 
-fn main() -> ExitCode {
+fn main() -> std::process::ExitCode {
     Cli::parse();
+
     match run() {
         Ok(output) => {
             // One call, so a consumer that reads this on a timer sees a full document or
             // nothing.
-            if io::stdout().write_all(output.as_bytes()).is_err() {
+            if std::io::stdout().write_all(output.as_bytes()).is_err() {
                 // A closed pipe is what `| head` looks like here. It is not an error.
-                return ExitCode::SUCCESS;
+                return std::process::ExitCode::SUCCESS;
             }
-            ExitCode::SUCCESS
+            std::process::ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!("claude-ps: {error}");
-            ExitCode::FAILURE
+            std::process::ExitCode::FAILURE
         }
     }
 }
 
 fn run() -> Result<String, String> {
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "the system clock is before the epoch".to_string())?
         .as_secs_f64();
 
@@ -91,36 +86,36 @@ fn home() -> Result<String, String> {
     std::env::var("HOME").map_err(|_| "HOME is not set".to_string())
 }
 
-fn sessions_dir(home: &str) -> PathBuf {
-    PathBuf::from(home).join(".claude").join("sessions")
+fn sessions_dir(home: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(home)
+        .join(".claude")
+        .join("sessions")
 }
 
 /// All readable session files that have a live agent.
 ///
 /// A file that this tool cannot read or parse is skipped without a message. Claude Code writes
 /// to this directory while this tool reads it, so an incomplete file is a normal event.
-fn collect(dir: &PathBuf, now_secs: f64, home: &str) -> Vec<Agent> {
-    let Ok(entries) = fs::read_dir(dir) else {
+fn collect(dir: &std::path::PathBuf, now_secs: f64, home: &str) -> Vec<agent::Agent> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|path| fs::read_to_string(&path).ok())
-        .filter_map(|text| serde_json::from_str::<SessionFile>(&text).ok())
+        .filter_map(|path| std::fs::read_to_string(&path).ok())
+        .filter_map(|text| serde_json::from_str::<agent::SessionFile>(&text).ok())
         .filter_map(|file| file.agent(now_secs, home))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn a_missing_sessions_directory_yields_no_agents() {
-        let agents = collect(
-            &PathBuf::from("/nonexistent/claude/sessions"),
+        let agents = super::collect(
+            &std::path::PathBuf::from("/nonexistent/claude/sessions"),
             0.0,
             "/home/you",
         );
@@ -129,13 +124,14 @@ mod tests {
 
     #[test]
     fn no_agents_is_an_empty_array_not_empty_output() {
-        let empty: Vec<Agent> = Vec::new();
+        let empty: Vec<crate::agent::Agent> = Vec::new();
         assert_eq!(serde_json::to_string(&empty).unwrap(), "[]");
     }
 
     #[test]
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
-        Cli::command().debug_assert();
+
+        super::Cli::command().debug_assert();
     }
 }

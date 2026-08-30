@@ -1,22 +1,16 @@
 //! The session file Claude Code writes, and the agent this tool prints for it.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-use crate::proc;
-use crate::transcript::{self, Context};
-
 /// `~/.claude/sessions/<pid>.json`, as much of it as this tool reads.
 ///
 /// All fields are optional, and unknown fields are ignored. This schema belongs to Claude Code
 /// and changes with its releases. A field that goes away costs one key, and not the agent.
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFile {
     pub pid: Option<u32>,
     /// Compared against `/proc/<pid>/stat` to find if the process is alive. Untyped, because
     /// Claude Code can write this value as a number or as a string.
-    pub proc_start: Option<Value>,
+    pub proc_start: Option<serde_json::Value>,
     /// Passed through verbatim. The vocabulary is open and changes with the version of Claude
     /// Code, so this tool does not compare the status against a known set of values.
     pub status: Option<String>,
@@ -43,7 +37,7 @@ impl SessionFile {
         let Some(recorded) = self.proc_start.as_ref().map(json_scalar) else {
             return false;
         };
-        proc::start_time(pid).is_some_and(|actual| actual == recorded)
+        crate::proc::start_time(pid).is_some_and(|actual| actual == recorded)
     }
 
     /// Milliseconds since the epoch that the current status was set, if it is known at all.
@@ -65,7 +59,9 @@ impl SessionFile {
             // Needs the cwd and the session id. This join is a guess and not a proof.
             // See `transcript`.
             context: match (self.cwd.as_deref(), self.session_id.as_deref()) {
-                (Some(cwd), Some(session_id)) => transcript::context_of(home, cwd, session_id),
+                (Some(cwd), Some(session_id)) => {
+                    crate::transcript::context_of(home, cwd, session_id)
+                }
                 _ => None,
             },
             zellij: Zellij::of(pid),
@@ -80,10 +76,10 @@ impl SessionFile {
 
 /// A JSON scalar as the shortest string that round-trips it, so a `procStart` of `987654` and a
 /// `procStart` of `"987654"` compare equal.
-fn json_scalar(value: &Value) -> String {
+fn json_scalar(value: &serde_json::Value) -> String {
     match value {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
         other => other.to_string(),
     }
 }
@@ -125,7 +121,7 @@ pub fn epoch_secs(ms: Option<f64>) -> u64 {
 ///
 /// The two fields are one object or nothing, and never one of the two. A session without a pane
 /// is not an address that a consumer can use.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Zellij {
     pub session: String,
     pub pane: String,
@@ -135,7 +131,7 @@ impl Zellij {
     /// Read from the environment of the agent. The session file gives the status of an agent
     /// and says nothing about zellij.
     fn of(pid: u32) -> Option<Self> {
-        match proc::zellij_of(pid) {
+        match crate::proc::zellij_of(pid) {
             (Some(session), Some(pane)) => Some(Zellij { session, pane }),
             _ => None,
         }
@@ -146,7 +142,7 @@ impl Zellij {
 ///
 /// The order of the fields is the order of the keys in the output: what the agent does, then for
 /// how long, then where it is. Consumers address the keys by name.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
     /// Verbatim from Claude Code. `null` only if the file has no status.
     pub status: Option<String>,
@@ -157,7 +153,7 @@ pub struct Agent {
     ///
     /// Tokens only, and no percentage: Claude Code does not write the size of the context
     /// window to disk.
-    pub context: Option<Context>,
+    pub context: Option<crate::transcript::Context>,
     /// `null` if the agent is not in zellij. This is a normal state and not a fault.
     pub zellij: Option<Zellij>,
     /// Claude's own label for the session. This is not the zellij session name.
@@ -183,17 +179,15 @@ impl Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn agent() -> Agent {
-        Agent {
+    fn agent() -> super::Agent {
+        super::Agent {
             status: Some("waiting".into()),
             age: 35,
-            context: Some(Context {
+            context: Some(crate::transcript::Context {
                 tokens: 187_953,
                 as_of: 1_788_052_221,
             }),
-            zellij: Some(Zellij {
+            zellij: Some(super::Zellij {
                 session: "work".into(),
                 pane: "1".into(),
             }),
@@ -218,69 +212,69 @@ mod tests {
     fn an_agent_outside_zellij_is_one_null() {
         let mut agent = agent();
         agent.zellij = None;
-        let value: Value = serde_json::to_value(&agent).unwrap();
-        assert_eq!(value["zellij"], Value::Null);
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["zellij"], serde_json::Value::Null);
     }
 
     #[test]
     fn a_cwd_with_whitespace_needs_no_special_handling() {
         let mut agent = agent();
         agent.cwd = Some("/home/you/my projects/thing".into());
-        let value: Value = serde_json::to_value(&agent).unwrap();
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["cwd"], "/home/you/my projects/thing");
     }
 
     #[test]
     fn started_at_separates_a_newborn_from_a_finished_turn() {
-        let newborn: SessionFile =
+        let newborn: super::SessionFile =
             serde_json::from_str(r#"{"startedAt":1755000000000,"statusUpdatedAt":1755000002000}"#)
                 .unwrap();
-        let finished: SessionFile =
+        let finished: super::SessionFile =
             serde_json::from_str(r#"{"startedAt":1754000000000,"statusUpdatedAt":1755000002000}"#)
                 .unwrap();
 
         // Identical from `age` alone -- the only thing a consumer had before this key.
         assert_eq!(
-            age_secs(1_755_000_012.0, newborn.status_set_at()),
-            age_secs(1_755_000_012.0, finished.status_set_at())
+            super::age_secs(1_755_000_012.0, newborn.status_set_at()),
+            super::age_secs(1_755_000_012.0, finished.status_set_at())
         );
 
         // Separable once the launch time is carried too.
-        assert_eq!(epoch_secs(newborn.started_at), 1_755_000_000);
-        assert_eq!(epoch_secs(finished.started_at), 1_754_000_000);
+        assert_eq!(super::epoch_secs(newborn.started_at), 1_755_000_000);
+        assert_eq!(super::epoch_secs(finished.started_at), 1_754_000_000);
     }
 
     #[test]
     fn an_undated_start_is_zero_not_now() {
-        assert_eq!(epoch_secs(None), 0);
-        assert_eq!(epoch_secs(Some(-1.0)), 0);
-        assert_eq!(epoch_secs(Some(1_755_000_000_999.0)), 1_755_000_000);
+        assert_eq!(super::epoch_secs(None), 0);
+        assert_eq!(super::epoch_secs(Some(-1.0)), 0);
+        assert_eq!(super::epoch_secs(Some(1_755_000_000_999.0)), 1_755_000_000);
     }
 
     #[test]
     fn age_is_whole_seconds_since_the_status_was_set() {
-        assert_eq!(age_secs(1_000.0, Some(940_500.0)), 59);
+        assert_eq!(super::age_secs(1_000.0, Some(940_500.0)), 59);
     }
 
     #[test]
     fn age_clamps_a_future_timestamp_to_zero() {
-        assert_eq!(age_secs(1_000.0, Some(9_999_000.0)), 0);
+        assert_eq!(super::age_secs(1_000.0, Some(9_999_000.0)), 0);
     }
 
     #[test]
     fn age_of_an_undated_status_is_zero_not_the_epoch() {
-        assert_eq!(age_secs(1_755_000_000.0, None), 0);
+        assert_eq!(super::age_secs(1_755_000_000.0, None), 0);
     }
 
     #[test]
     fn proc_start_compares_equal_as_number_or_string() {
-        assert_eq!(json_scalar(&serde_json::json!(987654)), "987654");
-        assert_eq!(json_scalar(&serde_json::json!("987654")), "987654");
+        assert_eq!(super::json_scalar(&serde_json::json!(987654)), "987654");
+        assert_eq!(super::json_scalar(&serde_json::json!("987654")), "987654");
     }
 
     #[test]
     fn session_file_tolerates_a_moving_schema() {
-        let file: SessionFile =
+        let file: super::SessionFile =
             serde_json::from_str(r#"{"pid":7,"status":"shell","somethingNew":true,"cwd":"/tmp"}"#)
                 .expect("unknown fields must not be an error");
         assert_eq!(file.pid, Some(7));
@@ -291,24 +285,24 @@ mod tests {
 
     #[test]
     fn status_set_at_prefers_the_most_specific_stamp() {
-        let file: SessionFile =
+        let file: super::SessionFile =
             serde_json::from_str(r#"{"statusUpdatedAt":3,"updatedAt":2,"startedAt":1}"#).unwrap();
         assert_eq!(file.status_set_at(), Some(3.0));
 
-        let file: SessionFile = serde_json::from_str(r#"{"startedAt":1}"#).unwrap();
+        let file: super::SessionFile = serde_json::from_str(r#"{"startedAt":1}"#).unwrap();
         assert_eq!(file.status_set_at(), Some(1.0));
     }
 
     #[test]
     fn a_file_without_proc_start_is_not_live() {
-        let file: SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
+        let file: super::SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
         assert!(file.agent(0.0, "/home/you").is_none());
     }
 
     #[test]
     fn sort_key_orders_by_session_then_pane_then_pid() {
         let mut a = agent();
-        a.zellij = Some(Zellij {
+        a.zellij = Some(super::Zellij {
             session: "alpha".into(),
             pane: "1".into(),
         });

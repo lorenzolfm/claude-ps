@@ -10,11 +10,7 @@
 //! There is no percentage here. Claude Code computes the size of the context window in memory
 //! and does not write it to disk. Consumers get the token count.
 
-use std::fs;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
+use std::io::{Read, Seek};
 
 /// How many bytes of the end of a transcript to read to find the last assistant turn.
 ///
@@ -24,7 +20,7 @@ use serde::{Deserialize, Serialize};
 const TAIL_BYTES: u64 = 256 * 1024;
 
 /// How loaded a session's context is, in tokens.
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Context {
     /// All tokens sent for the most recent assistant turn: new input, cache writes and cache
     /// reads. Output tokens are not included, because they go in the next request.
@@ -38,12 +34,12 @@ pub struct Context {
 
 /// `~/.claude/projects/<slug>/<session_id>.jsonl`, where the slug is `cwd` with every `/` and
 /// every `.` replaced by `-`.
-fn transcript_path(home: &str, cwd: &str, session_id: &str) -> PathBuf {
+fn transcript_path(home: &str, cwd: &str, session_id: &str) -> std::path::PathBuf {
     let slug: String = cwd
         .chars()
         .map(|c| if c == '/' || c == '.' { '-' } else { c })
         .collect();
-    PathBuf::from(home)
+    std::path::PathBuf::from(home)
         .join(".claude")
         .join("projects")
         .join(slug)
@@ -60,11 +56,11 @@ pub fn context_of(home: &str, cwd: &str, session_id: &str) -> Option<Context> {
 ///
 /// A read that starts in the middle of the file drops its first line, because that line is part
 /// of a record. The bytes are decoded lossily, so one bad byte does not cost the full answer.
-fn tail(path: &PathBuf, max: u64) -> Option<String> {
-    let mut file = fs::File::open(path).ok()?;
+fn tail(path: &std::path::PathBuf, max: u64) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let start = len.saturating_sub(max);
-    file.seek(SeekFrom::Start(start)).ok()?;
+    file.seek(std::io::SeekFrom::Start(start)).ok()?;
 
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
@@ -78,7 +74,7 @@ fn tail(path: &PathBuf, max: u64) -> Option<String> {
 }
 
 /// One transcript record, as much of it as this module reads.
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct Entry {
     #[serde(rename = "type", default)]
     kind: Option<String>,
@@ -92,13 +88,13 @@ struct Entry {
     message: Option<Message>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct Message {
     #[serde(default)]
     usage: Option<Usage>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct Usage {
     #[serde(default)]
     input_tokens: u64,
@@ -166,14 +162,12 @@ fn iso_epoch_secs(iso: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn the_slug_replaces_both_slashes_and_dots() {
-        let path = transcript_path("/home/you", "/home/you/.config/nixos", "abc");
+        let path = super::transcript_path("/home/you", "/home/you/.config/nixos", "abc");
         assert!(path.ends_with("projects/-home-you--config-nixos/abc.jsonl"));
 
-        let path = transcript_path("/home/you", "/home/you/Work/infra.git/master", "abc");
+        let path = super::transcript_path("/home/you", "/home/you/Work/infra.git/master", "abc");
         assert!(path.ends_with("projects/-home-you-Work-infra-git-master/abc.jsonl"));
     }
 
@@ -181,7 +175,7 @@ mod tests {
 
     #[test]
     fn sums_the_three_input_kinds_and_not_the_output() {
-        let context = last_assistant_usage(ASSISTANT).unwrap();
+        let context = super::last_assistant_usage(ASSISTANT).unwrap();
         assert_eq!(context.tokens, 2 + 2015 + 185_936);
         assert_eq!(context.as_of, 1_788_052_221);
     }
@@ -190,43 +184,43 @@ mod tests {
     fn the_last_assistant_turn_is_the_answer() {
         let older = ASSISTANT.replace("185936", "1000");
         let text = format!("{older}\n{ASSISTANT}\n");
-        assert_eq!(last_assistant_usage(&text).unwrap().tokens, 187_953);
+        assert_eq!(super::last_assistant_usage(&text).unwrap().tokens, 187_953);
     }
 
     #[test]
     fn a_sidechain_turn_is_not_this_sessions_context() {
         let sidechain = ASSISTANT.replace(r#""isSidechain":false"#, r#""isSidechain":true"#);
-        assert_eq!(last_assistant_usage(&sidechain), None);
+        assert_eq!(super::last_assistant_usage(&sidechain), None);
 
         // ...and it does not shadow the real answer sitting behind it.
         let text = format!("{ASSISTANT}\n{sidechain}\n");
-        assert_eq!(last_assistant_usage(&text).unwrap().tokens, 187_953);
+        assert_eq!(super::last_assistant_usage(&text).unwrap().tokens, 187_953);
     }
 
     #[test]
     fn a_half_written_line_is_skipped_not_fatal() {
         let text = format!("{ASSISTANT}\n{{\"type\":\"assis");
-        assert_eq!(last_assistant_usage(&text).unwrap().tokens, 187_953);
+        assert_eq!(super::last_assistant_usage(&text).unwrap().tokens, 187_953);
     }
 
     #[test]
     fn no_assistant_turn_is_none_not_zero() {
-        assert_eq!(last_assistant_usage(r#"{"type":"user"}"#), None);
-        assert_eq!(last_assistant_usage(""), None);
+        assert_eq!(super::last_assistant_usage(r#"{"type":"user"}"#), None);
+        assert_eq!(super::last_assistant_usage(""), None);
     }
 
     #[test]
     fn iso_stamps_convert_to_epoch_seconds() {
-        assert_eq!(iso_epoch_secs("1970-01-01T00:00:00.000Z"), Some(0));
+        assert_eq!(super::iso_epoch_secs("1970-01-01T00:00:00.000Z"), Some(0));
         assert_eq!(
-            iso_epoch_secs("2026-08-30T01:10:21.036Z"),
+            super::iso_epoch_secs("2026-08-30T01:10:21.036Z"),
             Some(1_788_052_221)
         );
         // A leap day, which is what the March-shifted year arithmetic exists for.
         assert_eq!(
-            iso_epoch_secs("2024-02-29T12:00:00.000Z"),
+            super::iso_epoch_secs("2024-02-29T12:00:00.000Z"),
             Some(1_709_208_000)
         );
-        assert_eq!(iso_epoch_secs("nonsense"), None);
+        assert_eq!(super::iso_epoch_secs("nonsense"), None);
     }
 }
