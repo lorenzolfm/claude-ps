@@ -2,7 +2,7 @@
 name = "claude-ps"
 version = "0.1.0"
 edition = "2024"
-description = "ps for Claude Code, joined to the zellij pane each agent runs in"
+description = "ps for Claude Code: all running agents, as JSON"
 license = "MIT"
 repository = "https://github.com/lorenzolfm/claude-ps"
 

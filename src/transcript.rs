@@ -1,17 +1,14 @@
-//! The token count Claude Code does not put in the session registry.
+//! The token count that Claude Code does not put in the session file.
 //!
-//! 🔴 **This is the tool's only inexact join, and it is deliberately kept separate from the
-//! others.** The registry join is provable — a pid and its start time. This one derives a path
-//! from `cwd`, and Claude Code builds that path by replacing both `/` **and** `.` with `-`,
-//! which is not injective: `/home/x/.config` and `/home/x-config` land on the same directory.
-//! So a hit is "almost certainly this session's transcript", never "provably". It costs one
-//! key when it is wrong, and the key is `null` when the file is not there at all.
+//! This is the only inexact join in this tool. The other joins use a pid and its start time,
+//! which are exact. This module makes a path from `cwd`, and Claude Code makes that path with a
+//! `-` for each `/` and each `.`. Two different directories can give the same path: for example
+//! `/home/x/.config` and `/home/x-config`. A hit is therefore almost certainly the transcript of
+//! the session, but not certainly. A wrong result costs one key, and the key is `null` if the
+//! file is not there.
 //!
-//! ⚠️ What is **not** here is a percentage. The context window size lives only in the payload
-//! Claude Code hands a status line at render time; it is computed in-process and never written
-//! down. A model-name lookup table could manufacture a denominator, and would then be
-//! confidently wrong the day a model ships that the table predates — the same failure the
-//! status vocabulary is passed through untouched to avoid. Consumers get the numerator.
+//! There is no percentage here. Claude Code computes the size of the context window in memory
+//! and does not write it to disk. Consumers get the token count.
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -19,27 +16,23 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// How much of the tail to read looking for the last assistant turn.
+/// How many bytes of the end of a transcript to read to find the last assistant turn.
 ///
-/// ⚠️ Bounded on purpose: a transcript grows without limit — a working session reaches a
-/// megabyte in an afternoon — and `claude-tray` polls this every few seconds across every
-/// agent at once. Reading whole files would make the cost of running this tool scale with how
-/// long you have been working. The last assistant turn is at the end by construction, so a
-/// window this size finds it for any conversation that is not one enormous message.
+/// A transcript has no limit on its size, and a consumer can read all agents every few seconds.
+/// A limit keeps the cost of this tool constant. The last assistant turn is at the end of the
+/// file, so this window finds it.
 const TAIL_BYTES: u64 = 256 * 1024;
 
 /// How loaded a session's context is, in tokens.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Context {
-    /// Everything sent for the most recent assistant turn: fresh input, cache writes and cache
-    /// reads. 🔴 Output tokens are **not** added — they are what the *next* request will carry,
-    /// and counting them here would overstate what is in the window now.
+    /// All tokens sent for the most recent assistant turn: new input, cache writes and cache
+    /// reads. Output tokens are not included, because they go in the next request.
     pub tokens: u64,
     /// Epoch seconds of that turn.
     ///
-    /// ⚠️ This value lags by design and the stamp is how a consumer can tell. It is measured at
-    /// the last *completed* assistant turn, so a session that is `busy` right now has been
-    /// growing its context since — which is exactly when someone is watching.
+    /// The token count is from the last completed assistant turn, so a session that is `busy`
+    /// has added tokens after this time. This stamp lets a consumer see how old the count is.
     pub as_of: u64,
 }
 
@@ -63,11 +56,10 @@ pub fn context_of(home: &str, cwd: &str, session_id: &str) -> Option<Context> {
     last_assistant_usage(&text)
 }
 
-/// The final `max` bytes of a file, starting at a line boundary.
+/// The last `max` bytes of a file, from the start of a line.
 ///
-/// A read that began mid-file drops its first line, which is the half of a record the offset
-/// landed inside. Decoded lossily for the same reason the environment is: a mangled byte
-/// somewhere in a transcript should not cost the whole answer.
+/// A read that starts in the middle of the file drops its first line, because that line is part
+/// of a record. The bytes are decoded lossily, so one bad byte does not cost the full answer.
 fn tail(path: &PathBuf, max: u64) -> Option<String> {
     let mut file = fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -90,9 +82,8 @@ fn tail(path: &PathBuf, max: u64) -> Option<String> {
 struct Entry {
     #[serde(rename = "type", default)]
     kind: Option<String>,
-    /// 🔴 Subagent turns are written into the **same** file, and their usage is the subagent's
-    /// own context rather than this session's. Counting one would report a number that belongs
-    /// to a conversation the user cannot see.
+    /// Claude Code writes subagent turns to the same file. The usage of a subagent turn is the
+    /// context of the subagent, and not the context of this session.
     #[serde(rename = "isSidechain", default)]
     is_sidechain: bool,
     #[serde(default)]
@@ -117,12 +108,11 @@ struct Usage {
     cache_read_input_tokens: u64,
 }
 
-/// Scan **backwards** for the newest assistant turn that reported usage.
+/// Find the newest assistant turn that reports usage. The scan goes backwards, because the
+/// answer is the last such turn and a transcript has many records before it.
 ///
-/// Backwards because the answer is the last one, and a transcript has thousands of records
-/// before it. Records that will not parse are skipped rather than ending the scan: this file is
-/// appended to by another process while this one reads it, so the final line is regularly half
-/// written.
+/// A record that does not parse is skipped and does not stop the scan. Claude Code appends to
+/// this file while this tool reads it, so the last line is frequently incomplete.
 pub fn last_assistant_usage(text: &str) -> Option<Context> {
     for line in text.lines().rev() {
         let Ok(entry) = serde_json::from_str::<Entry>(line) else {
@@ -150,9 +140,8 @@ pub fn last_assistant_usage(text: &str) -> Option<Context> {
 
 /// `2026-08-30T01:10:21.036Z` as epoch seconds.
 ///
-/// Hand-rolled rather than pulling in a date crate for one field: the format is fixed, it is
-/// always UTC, and only the whole seconds are wanted. An unparseable stamp is `0`, on the same
-/// reasoning as an undated age — 1970 reads as breakage where "now" would read as data.
+/// The format is fixed, the time is always UTC, and only whole seconds are necessary, so this
+/// module does not use a date crate. A stamp that does not parse gives `0`.
 fn iso_epoch_secs(iso: &str) -> Option<u64> {
     let bytes = iso.as_bytes();
     if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
@@ -179,8 +168,6 @@ fn iso_epoch_secs(iso: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// 🔴 Both separators collapse to `-`, which is why this derivation is a good guess and not
-    /// a proof. `.config` becoming `--config` is the visible shape of that.
     #[test]
     fn the_slug_replaces_both_slashes_and_dots() {
         let path = transcript_path("/home/you", "/home/you/.config/nixos", "abc");
@@ -199,7 +186,6 @@ mod tests {
         assert_eq!(context.as_of, 1_788_052_221);
     }
 
-    /// The newest turn wins, and the scan runs from the end to find it.
     #[test]
     fn the_last_assistant_turn_is_the_answer() {
         let older = ASSISTANT.replace("185936", "1000");
@@ -207,7 +193,6 @@ mod tests {
         assert_eq!(last_assistant_usage(&text).unwrap().tokens, 187_953);
     }
 
-    /// 🔴 A subagent's context is not this session's, and both are written to the same file.
     #[test]
     fn a_sidechain_turn_is_not_this_sessions_context() {
         let sidechain = ASSISTANT.replace(r#""isSidechain":false"#, r#""isSidechain":true"#);
@@ -218,14 +203,12 @@ mod tests {
         assert_eq!(last_assistant_usage(&text).unwrap().tokens, 187_953);
     }
 
-    /// The file is appended to while this reads it, so a torn final line is ordinary.
     #[test]
     fn a_half_written_line_is_skipped_not_fatal() {
         let text = format!("{ASSISTANT}\n{{\"type\":\"assis");
         assert_eq!(last_assistant_usage(&text).unwrap().tokens, 187_953);
     }
 
-    /// User turns carry no usage, and a transcript with none at all has no answer to give.
     #[test]
     fn no_assistant_turn_is_none_not_zero() {
         assert_eq!(last_assistant_usage(r#"{"type":"user"}"#), None);

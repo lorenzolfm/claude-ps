@@ -8,43 +8,37 @@ use crate::transcript::{self, Context};
 
 /// `~/.claude/sessions/<pid>.json`, as much of it as this tool reads.
 ///
-/// Every field is optional and unknown fields are ignored, which is deliberate rather than
-/// defensive: this schema belongs to Claude Code and moves with its releases. A field that
-/// disappears must cost one key, not the whole agent.
+/// All fields are optional, and unknown fields are ignored. This schema belongs to Claude Code
+/// and changes with its releases. A field that goes away costs one key, and not the agent.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFile {
     pub pid: Option<u32>,
-    /// Compared against `/proc/<pid>/stat` for liveness. Kept untyped because it has been seen
-    /// as a JSON number and there is no reason it could not be written as a string.
+    /// Compared against `/proc/<pid>/stat` to find if the process is alive. Untyped, because
+    /// Claude Code can write this value as a number or as a string.
     pub proc_start: Option<Value>,
-    /// 🔴 Passed through **verbatim**, never matched against a known set. The vocabulary is open
-    /// and moves with Claude's version — `shell` appeared in a release after `waiting`, `idle`
-    /// and `busy`. A tool that filtered to the statuses it knew would silently drop live agents
-    /// every time Claude invented one.
+    /// Passed through verbatim. The vocabulary is open and changes with the version of Claude
+    /// Code, so this tool does not compare the status against a known set of values.
     pub status: Option<String>,
-    /// Claude's own derived name, e.g. `zellij-f8`. 🔴 **Not** the zellij session name — it is
-    /// the cwd's basename plus a suffix. Emitted because it is cheap, not because it identifies
-    /// anything a user typed.
+    /// Claude's own label for the session, for example `zellij-f8`. This is the basename of the
+    /// cwd and a suffix. It is not the zellij session name.
     pub name: Option<String>,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
-    /// Epoch milliseconds. The first of these three that is present dates the status.
+    /// Epoch milliseconds. The first of these three fields that is present dates the status.
     pub status_updated_at: Option<f64>,
     pub updated_at: Option<f64>,
-    /// Epoch milliseconds the session began. Dates the status as a last resort, **and** is a
-    /// key in its own right: without it a consumer cannot tell a session that just launched
-    /// from one that just finished a turn, because both read as `idle` with a small `age`.
+    /// Epoch milliseconds when the session started. It dates the status as a last resort, and it
+    /// is also an output key: a new session and a session that completed a turn are both `idle`
+    /// with a small age, and only this field makes them different.
     pub started_at: Option<f64>,
 }
 
 impl SessionFile {
-    /// Whether the pid in this file is still the process that wrote it.
+    /// Whether the pid in this file is still the process that wrote the file.
     ///
-    /// 🔴 Both halves are required. "Is the pid alive" alone is not enough: pids are recycled,
-    /// and a stale file whose pid now belongs to something unrelated would hand a consumer that
-    /// process's zellij pane. Comparing the start time as well makes the check exact, so
-    /// `Enter` in a picker cannot land on a pane that has nothing to do with Claude.
+    /// Both conditions are necessary. Linux recycles pids, so a stale file can name a pid that
+    /// now belongs to a different process. The start time makes the check exact.
     fn is_live(&self, pid: u32) -> bool {
         let Some(recorded) = self.proc_start.as_ref().map(json_scalar) else {
             return false;
@@ -68,8 +62,8 @@ impl SessionFile {
         Some(Agent {
             status: self.status.clone(),
             age: age_secs(now_secs, self.status_set_at()),
-            // Needs both halves of the path, and gives up quietly without them. This is the
-            // one join here that is a guess rather than a proof -- see `transcript`.
+            // Needs the cwd and the session id. This join is a guess and not a proof.
+            // See `transcript`.
             context: match (self.cwd.as_deref(), self.session_id.as_deref()) {
                 (Some(cwd), Some(session_id)) => transcript::context_of(home, cwd, session_id),
                 _ => None,
@@ -84,8 +78,8 @@ impl SessionFile {
     }
 }
 
-/// A JSON scalar as the shortest string that round-trips it, so a `procStart` written as the
-/// number `987654` and one written as `"987654"` compare equal.
+/// A JSON scalar as the shortest string that round-trips it, so a `procStart` of `987654` and a
+/// `procStart` of `"987654"` compare equal.
 fn json_scalar(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -94,12 +88,11 @@ fn json_scalar(value: &Value) -> String {
     }
 }
 
-/// Whole seconds spent in the current status.
+/// Whole seconds in the current status.
 ///
-/// ⚠️ An unknown timestamp is **zero**, not "now minus the epoch". Reading a missing field as
-/// `0` epoch-milliseconds is the obvious shortcut and it renders every agent as roughly
-/// fifty-seven years old, which looks like data rather than like breakage — so if Claude ever
-/// renames these fields the failure is a column of `0`s, which is visibly wrong.
+/// An unknown timestamp gives an age of `0`. A missing field read as epoch millisecond `0` would
+/// show every agent with an age of approximately 57 years, which looks like data and not like a
+/// fault.
 pub fn age_secs(now_secs: f64, status_set_at_ms: Option<f64>) -> u64 {
     let Some(set_at_ms) = status_set_at_ms else {
         return 0;
@@ -112,12 +105,10 @@ pub fn age_secs(now_secs: f64, status_set_at_ms: Option<f64>) -> u64 {
     }
 }
 
-/// Epoch **seconds** for a timestamp Claude Code writes in milliseconds.
+/// Epoch seconds for a timestamp that Claude Code writes in milliseconds.
 ///
-/// ⚠️ An absent timestamp is `0`, on the same reasoning as [`age_secs`]: it renders as 1970,
-/// which reads as breakage rather than as data. It also fails in the safe direction for the one
-/// thing this key exists for — a consumer suppressing just-launched sessions computes an
-/// enormous session age, so it suppresses nothing rather than hiding a live agent.
+/// An absent timestamp gives `0`, for the same reason as [`age_secs`]. A consumer that hides new
+/// sessions then computes a very large age, so it hides nothing.
 pub fn epoch_secs(ms: Option<f64>) -> u64 {
     let Some(ms) = ms else {
         return 0;
@@ -130,12 +121,10 @@ pub fn epoch_secs(ms: Option<f64>) -> u64 {
     }
 }
 
-/// Where an agent is sitting, when it is sitting in zellij at all.
+/// Where an agent runs in zellij.
 ///
-/// 🔴 The two halves are **one object or nothing**, never one of each. Attaching to a session
-/// and focusing a pane is a single act for a consumer, and a session without a pane would be an
-/// address it cannot use. Nesting them makes that unrepresentable rather than merely documented
-/// — which is what the old pair of `-` placeholders left to prose.
+/// The two fields are one object or nothing, and never one of the two. A session without a pane
+/// is not an address that a consumer can use.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Zellij {
     pub session: String,
@@ -143,8 +132,8 @@ pub struct Zellij {
 }
 
 impl Zellij {
-    /// Read from the agent's own environment. This is the half of the join Claude does not
-    /// write down: the session file says what an agent is doing and nothing about where it is.
+    /// Read from the environment of the agent. The session file gives the status of an agent
+    /// and says nothing about zellij.
     fn of(pid: u32) -> Option<Self> {
         match proc::zellij_of(pid) {
             (Some(session), Some(pane)) => Some(Zellij { session, pane }),
@@ -155,41 +144,35 @@ impl Zellij {
 
 /// One agent, as one JSON object.
 ///
-/// 🔴 Key order here is the order they serialise in, and it is the reading order: what the
-/// agent is doing, then how long, then where it is. Consumers address these **by name**, so
-/// adding a key is not a breaking change the way appending a column was.
+/// The order of the fields is the order of the keys in the output: what the agent does, then for
+/// how long, then where it is. Consumers address the keys by name.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
-    /// Verbatim from Claude Code. `null` only if the file had no status at all.
+    /// Verbatim from Claude Code. `null` only if the file has no status.
     pub status: Option<String>,
     /// Whole seconds in the current status.
     pub age: u64,
-    /// How many tokens the session was carrying at its last assistant turn, or `null` when the
-    /// transcript could not be found or held no turn.
+    /// The tokens that the session carried at its last assistant turn, or `null` if the
+    /// transcript is not found or holds no assistant turn.
     ///
-    /// ⚠️ Tokens only — there is deliberately no percentage. The window size is never written
-    /// to disk, so a denominator here would have to come from a model-name table that goes
-    /// confidently wrong the day a new model ships. The consumer owns that decision.
+    /// Tokens only, and no percentage: Claude Code does not write the size of the context
+    /// window to disk.
     pub context: Option<Context>,
-    /// `null` when the agent is not inside zellij, which is an ordinary state and not a fault.
+    /// `null` if the agent is not in zellij. This is a normal state and not a fault.
     pub zellij: Option<Zellij>,
-    /// Claude's own derived label, **not** the zellij session name.
+    /// Claude's own label for the session. This is not the zellij session name.
     pub name: Option<String>,
     pub pid: u32,
     pub session_id: Option<String>,
-    /// Epoch seconds, and deliberately absolute where `age` is a duration: it answers *when did
-    /// this session begin*, which does not go stale between this process reading it and a
-    /// consumer using it.
+    /// Epoch seconds when the session started. This is an absolute time, where `age` is a
+    /// duration, so the value does not become stale before a consumer uses it.
     pub started_at: u64,
     pub cwd: Option<String>,
 }
 
 impl Agent {
-    /// Deterministic, **not** presentational. Two runs a second apart diff cleanly; deciding
-    /// what order a human should see them in belongs to whatever is doing the showing.
-    ///
-    /// Agents outside zellij sort last as a group, because the empty key sorts before every
-    /// real session name and putting them first would bury the addressable ones.
+    /// A stable order, and not an order for a person: two runs one second apart give a small
+    /// diff. Agents outside zellij sort last as a group.
     pub fn sort_key(&self) -> (bool, &str, &str, u32) {
         match &self.zellij {
             Some(z) => (false, z.session.as_str(), z.pane.as_str(), self.pid),
@@ -231,9 +214,6 @@ mod tests {
         );
     }
 
-    /// 🔴 The reason the pair is nested. An agent outside zellij has no address at all, and one
-    /// `null` says that where two placeholders left a consumer to check both and agree on what
-    /// the pair meant.
     #[test]
     fn an_agent_outside_zellij_is_one_null() {
         let mut agent = agent();
@@ -242,8 +222,6 @@ mod tests {
         assert_eq!(value["zellij"], Value::Null);
     }
 
-    /// A cwd with whitespace needed a rule about column position under TSV. Under JSON it needs
-    /// nothing: it is a string, and the encoder owns the escaping.
     #[test]
     fn a_cwd_with_whitespace_needs_no_special_handling() {
         let mut agent = agent();
@@ -252,8 +230,6 @@ mod tests {
         assert_eq!(value["cwd"], "/home/you/my projects/thing");
     }
 
-    /// 🔴 The whole reason this key exists: a session that just launched and one that just
-    /// finished a turn are both `idle` with a small `age`, and only `started_at` separates them.
     #[test]
     fn started_at_separates_a_newborn_from_a_finished_turn() {
         let newborn: SessionFile =
@@ -274,9 +250,6 @@ mod tests {
         assert_eq!(epoch_secs(finished.started_at), 1_754_000_000);
     }
 
-    /// ⚠️ Same reasoning as an undated age: 1970 reads as breakage, and a consumer computing a
-    /// session age from it decides "not a newborn", which is the direction that shows an agent
-    /// rather than hides one.
     #[test]
     fn an_undated_start_is_zero_not_now() {
         assert_eq!(epoch_secs(None), 0);
@@ -289,14 +262,11 @@ mod tests {
         assert_eq!(age_secs(1_000.0, Some(940_500.0)), 59);
     }
 
-    /// Clocks disagree; a status stamped in the future is zero, never a huge wrapped number.
     #[test]
     fn age_clamps_a_future_timestamp_to_zero() {
         assert_eq!(age_secs(1_000.0, Some(9_999_000.0)), 0);
     }
 
-    /// ⚠️ The regression this tool's predecessor carried: no timestamp meant an age of ~57
-    /// years, which reads as data rather than as breakage.
     #[test]
     fn age_of_an_undated_status_is_zero_not_the_epoch() {
         assert_eq!(age_secs(1_755_000_000.0, None), 0);
@@ -308,8 +278,6 @@ mod tests {
         assert_eq!(json_scalar(&serde_json::json!("987654")), "987654");
     }
 
-    /// Unknown fields are ignored and missing ones are `None`, so a schema change costs a key
-    /// rather than the agent.
     #[test]
     fn session_file_tolerates_a_moving_schema() {
         let file: SessionFile =
@@ -331,7 +299,6 @@ mod tests {
         assert_eq!(file.status_set_at(), Some(1.0));
     }
 
-    /// A file with no `procStart` cannot be checked, so it is not trusted.
     #[test]
     fn a_file_without_proc_start_is_not_live() {
         let file: SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
@@ -348,8 +315,6 @@ mod tests {
         assert!(a.sort_key() < agent().sort_key());
     }
 
-    /// Outside-zellij agents group at the end rather than at the front, where an empty session
-    /// name would otherwise put them.
     #[test]
     fn agents_outside_zellij_sort_last() {
         let mut outside = agent();
