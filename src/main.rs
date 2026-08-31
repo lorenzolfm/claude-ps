@@ -14,7 +14,8 @@ use std::io::Write;
 ps for Claude Code. Prints all running agents as a JSON array on stdout, one
 object per agent:
 
-  status              what Claude reports, verbatim (busy, idle, waiting, ...)
+  status              what Claude reports, verbatim (busy, idle, waiting, ...),
+                      or null if Claude reports none
   status_age          whole seconds in that status
   zellij              {session, pane}, or null if the agent is not in zellij
   name                Claude's own label for the session

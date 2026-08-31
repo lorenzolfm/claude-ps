@@ -191,7 +191,7 @@ fn duration(secs: u64) -> String {
 mod tests {
     fn agent(name: &str, pid: u32) -> crate::agent::Agent {
         crate::agent::Agent {
-            status: Some("waiting".into()),
+            status: crate::agent::StatusWord::parse(Some("waiting")),
             status_age: 35,
             zellij: Some(crate::agent::Zellij {
                 session: "work".into(),
