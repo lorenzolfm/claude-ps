@@ -39,7 +39,7 @@ fn row(agent: &crate::agent::Agent, now_secs: i64, home: &str) -> Row {
     [
         name(agent),
         text(agent.status.as_deref()),
-        duration(agent.status_age),
+        agent.status_age.map_or_else(missing, duration),
         elapsed(agent.session_started_at, now_secs),
         text(agent.permission_mode.as_deref()),
         agent
@@ -154,12 +154,13 @@ fn tilde(path: &str, home: &str) -> String {
 
 /// How long the session runs, from a start in epoch seconds.
 ///
-/// A start of `0` is the unknown start of the JSON, and it prints as the missing value. A clock
-/// that moved back gives a start in the future, which prints as `0s` and not as a large number.
-fn elapsed(started_at: u64, now_secs: i64) -> String {
-    if started_at == 0 {
+/// A session that carries no start prints as the missing value, like every other key that the
+/// session file does not have. A clock that moved back gives a start in the future, which prints
+/// as `0s` and not as a large number.
+fn elapsed(started_at: Option<u64>, now_secs: i64) -> String {
+    let Some(started_at) = started_at else {
         return missing();
-    }
+    };
     let now = u64::try_from(now_secs).unwrap_or(0);
     duration(now.saturating_sub(started_at))
 }
@@ -192,13 +193,13 @@ mod tests {
     fn agent(name: &str, pid: u32) -> crate::agent::Agent {
         crate::agent::Agent {
             status: crate::agent::Text::word(Some("waiting")),
-            status_age: 35,
+            status_age: Some(35),
             zellij: address("work", "1"),
             name: crate::agent::Text::verbatim(Some(name)),
             name_source: crate::agent::Text::word(Some("user")),
             pid,
             session_id: crate::agent::Text::verbatim(Some("abc-123")),
-            session_started_at: 1_755_000_000,
+            session_started_at: Some(1_755_000_000),
             cwd: crate::agent::Text::verbatim(Some("/home/you/src")),
             permission_mode: None,
         }
@@ -263,12 +264,13 @@ mod tests {
         one.name = None;
         one.zellij = None;
         one.cwd = None;
-        one.session_started_at = 0;
+        one.status_age = None;
+        one.session_started_at = None;
         one.permission_mode = None;
         let table = super::table(&[one], 1_755_000_100, "/home/you");
         assert_eq!(
             table.lines().nth(3).unwrap(),
-            " -     -       35s        -  -     -      1  -"
+            " -     -         -        -  -     -      1  -"
         );
     }
 
@@ -376,11 +378,25 @@ mod tests {
 
     #[test]
     fn an_unknown_session_start_is_a_dash_and_not_57_years() {
-        assert_eq!(super::elapsed(0, 1_755_000_000), "-");
+        assert_eq!(super::elapsed(None, 1_755_000_000), "-");
     }
 
     #[test]
     fn a_session_start_in_the_future_is_zero_and_not_a_large_number() {
-        assert_eq!(super::elapsed(1_755_000_100, 1_755_000_000), "0s");
+        assert_eq!(super::elapsed(Some(1_755_000_100), 1_755_000_000), "0s");
+    }
+
+    /// `0s` in this column is a status that changed a moment ago, and a person reads it that
+    /// way. A status that no timestamp dates is not that, and it carries the mark of a value
+    /// the session file does not have.
+    #[test]
+    fn an_undated_status_is_a_dash_and_not_a_fresh_zero() {
+        let mut undated = agent("x", 1);
+        undated.status_age = None;
+        let table = super::table(&[undated], 1_755_000_100, "/home/you");
+        assert_eq!(
+            table.lines().nth(3).unwrap(),
+            " x     waiting    -   1m 40s  -     ~/src    1  work:1"
+        );
     }
 }

@@ -41,7 +41,7 @@ There is no procfs on darwin, so the flake does not build for darwin.
 | Key | Content |
 |---|---|
 | `status` | What Claude reports, verbatim |
-| `status_age` | Whole seconds in that status |
+| `status_age` | Whole seconds in that status, or `0` if no timestamp dates it |
 | `zellij` | `{session, pane}`, or `null` if the agent is not in zellij. A variable that is set and empty carries no address, so it is `null` too |
 | `name` | Claude's own label for the session |
 | `name_source` | Who chose the name, or `null` |
@@ -88,8 +88,9 @@ this page. It shows the durations in hours and minutes, the home directory as
 `~`, and the zellij address as `session:pane`. A key that the session file does
 not have is `-`.
 
-`AGE` is the time in the current status. `ELAPSED` is the time since the
-session started. A `~` after a name marks a name that Claude derived rather
+`AGE` is the time in the current status, and `-` for a status that no
+timestamp dates, which the JSON cannot tell from a status of `0` seconds.
+`ELAPSED` is the time since the session started. A `~` after a name marks a name that Claude derived rather
 than a person chose, because such a name repeats the `CWD` on the same line.
 
 This table is for eyes only. The columns, the order, and the format of a value

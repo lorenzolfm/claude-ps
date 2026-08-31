@@ -119,28 +119,39 @@ fn json_scalar(value: &serde_json::Value) -> String {
     }
 }
 
-/// Whole seconds in the current status.
+/// Whole seconds in the current status, and `None` for a status that no timestamp dates.
 ///
-/// An unknown timestamp gives a status age of `0`. A missing field read as epoch millisecond `0`
-/// would show every agent in its status for approximately 57 years, which looks like data and not
-/// like a fault.
-pub fn status_age_secs(now_secs: i64, status_set_at_ms: Option<i64>) -> u64 {
-    let Some(set_at_ms) = status_set_at_ms else {
-        return 0;
-    };
+/// A status set in this second is `Some(0)`, and the two are not the same answer. The `0` of the
+/// JSON spells both, which is the one thing this tool cannot change; inside it they stay apart,
+/// and the table prints the missing mark for the one that is not a duration.
+///
+/// A missing field read as epoch millisecond `0` would show every agent in its status for
+/// approximately 57 years, which looks like data and not like a fault.
+pub fn status_age_secs(now_secs: i64, status_set_at_ms: Option<i64>) -> Option<u64> {
+    let set_at_ms = status_set_at_ms?;
     let elapsed_ms = now_secs.saturating_mul(1000).saturating_sub(set_at_ms);
-    u64::try_from(elapsed_ms / 1000).unwrap_or(0)
+    // A status that a clock change dates in the future is `0` seconds old, which is an answer.
+    Some(u64::try_from(elapsed_ms / 1000).unwrap_or(0))
 }
 
-/// Epoch seconds for a timestamp that Claude Code writes in milliseconds.
+/// Epoch seconds for a timestamp that Claude Code writes in milliseconds, and `None` for a
+/// session that carries no start.
 ///
-/// An absent timestamp gives `0`, for the same reason as [`status_age_secs`]. A consumer that
-/// hides new sessions then computes a very large session age, so it hides nothing.
-pub fn epoch_secs(ms: Option<i64>) -> u64 {
-    let Some(ms) = ms else {
-        return 0;
-    };
-    u64::try_from(ms / 1000).unwrap_or(0)
+/// A start before the epoch is a start that no clock wrote, and it is unknown for the same
+/// reason. A consumer that hides new sessions would otherwise compute a session age of the age
+/// of the epoch, so it hides nothing.
+pub fn epoch_secs(ms: Option<i64>) -> Option<u64> {
+    Some(u64::try_from(ms?).ok()? / 1000)
+}
+
+/// `0` is the published spelling of an unknown timestamp, so the encoding lives here and nowhere
+/// else. The JSON is a contract, and `status_age` and `session_started_at` have both spelled an
+/// absence that way since the first release.
+fn zero_when_unknown<S: serde::Serializer>(
+    secs: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u64(secs.unwrap_or(0))
 }
 
 /// Where an agent runs in zellij.
@@ -220,13 +231,17 @@ impl std::ops::Deref for Text {
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
     pub status: Option<Text>,
-    pub status_age: u64,
+    /// Whole seconds in the current status, and `None` for a status that no timestamp dates.
+    /// Both leave as a number, because the `0` of an unknown age is the published spelling.
+    #[serde(serialize_with = "zero_when_unknown")]
+    pub status_age: Option<u64>,
     pub zellij: Option<Zellij>,
     pub name: Option<Text>,
     pub name_source: Option<Text>,
     pub pid: u32,
     pub session_id: Option<Text>,
-    pub session_started_at: u64,
+    #[serde(serialize_with = "zero_when_unknown")]
+    pub session_started_at: Option<u64>,
     pub cwd: Option<Text>,
     /// The permission mode that the command line of the agent asks for, and `None` for a
     /// command line that does not ask for one.
@@ -241,13 +256,13 @@ mod tests {
     fn agent() -> super::Agent {
         super::Agent {
             status: super::Text::word(Some("waiting")),
-            status_age: 35,
+            status_age: Some(35),
             zellij: address("work", "1"),
             name: super::Text::verbatim(Some("work-f8")),
             name_source: super::Text::word(Some("user")),
             pid: 4242,
             session_id: super::Text::verbatim(Some("abc-123")),
-            session_started_at: 1_755_000_000,
+            session_started_at: Some(1_755_000_000),
             cwd: super::Text::verbatim(Some("/home/you/src")),
             permission_mode: super::Text::word(Some("plan")),
         }
@@ -403,30 +418,52 @@ mod tests {
         );
 
         // Separable once the launch time is carried too.
-        assert_eq!(super::epoch_secs(newborn.started_at), 1_755_000_000);
-        assert_eq!(super::epoch_secs(finished.started_at), 1_754_000_000);
+        assert_eq!(super::epoch_secs(newborn.started_at), Some(1_755_000_000));
+        assert_eq!(super::epoch_secs(finished.started_at), Some(1_754_000_000));
     }
 
     #[test]
-    fn an_undated_session_start_is_zero_not_now() {
-        assert_eq!(super::epoch_secs(None), 0);
-        assert_eq!(super::epoch_secs(Some(-1)), 0);
-        assert_eq!(super::epoch_secs(Some(1_755_000_000_999)), 1_755_000_000);
+    fn an_undated_session_start_is_absent_and_not_now() {
+        assert_eq!(super::epoch_secs(None), None);
+        assert_eq!(super::epoch_secs(Some(-1)), None);
+        assert_eq!(
+            super::epoch_secs(Some(1_755_000_000_999)),
+            Some(1_755_000_000)
+        );
     }
 
     #[test]
     fn the_status_age_is_whole_seconds_since_the_status_was_set() {
-        assert_eq!(super::status_age_secs(1_000, Some(940_500)), 59);
+        assert_eq!(super::status_age_secs(1_000, Some(940_500)), Some(59));
     }
 
     #[test]
     fn the_status_age_clamps_a_future_timestamp_to_zero() {
-        assert_eq!(super::status_age_secs(1_000, Some(9_999_000)), 0);
+        assert_eq!(super::status_age_secs(1_000, Some(9_999_000)), Some(0));
     }
 
+    /// A status that no timestamp dates and a status that was set in this second both print
+    /// `0` on the wire, and only one of them is a duration. The reader of the JSON cannot tell
+    /// them apart, and nothing inside this tool has to guess which one it holds.
     #[test]
-    fn the_status_age_of_an_undated_status_is_zero_not_the_epoch() {
-        assert_eq!(super::status_age_secs(1_755_000_000, None), 0);
+    fn an_undated_status_and_a_status_of_this_second_are_not_the_same_age() {
+        assert_eq!(super::status_age_secs(1_755_000_000, None), None);
+        assert_eq!(
+            super::status_age_secs(1_755_000_000, Some(1_755_000_000_000)),
+            Some(0)
+        );
+    }
+
+    /// The `0` of an unknown timestamp is the published spelling, and a consumer reads it
+    /// today. It stays a number, and it never becomes `null`.
+    #[test]
+    fn an_unknown_timestamp_is_zero_on_the_wire() {
+        let mut agent = agent();
+        agent.status_age = None;
+        agent.session_started_at = None;
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["status_age"], 0);
+        assert_eq!(value["session_started_at"], 0);
     }
 
     #[test]
