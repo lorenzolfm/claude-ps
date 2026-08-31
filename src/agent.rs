@@ -16,8 +16,8 @@ pub struct SessionFile {
     /// machine before the pid is used at all.
     pub pid_domain: Option<String>,
     /// The raw read. The vocabulary is open and changes with the version of Claude Code, so this
-    /// tool does not compare the status against a known set of values. [`StatusWord`] is what
-    /// leaves this tool.
+    /// tool does not compare the status against a known set of values. [`Text`] is what leaves
+    /// this tool.
     pub status: Option<String>,
     /// Claude's own label for the session, for example `zellij-f8`. This is the basename of the
     /// cwd and a suffix. It is not the zellij session name.
@@ -84,16 +84,16 @@ impl SessionFile {
             return None;
         }
         Some(Agent {
-            status: StatusWord::parse(self.status.as_deref()),
+            status: Text::word(self.status.as_deref()),
             status_age: status_age_secs(now_secs, self.status_set_at()),
             zellij: Zellij::of(pid),
-            name: self.name.clone(),
-            name_source: self.name_source.clone(),
+            name: Text::verbatim(self.name.as_deref()),
+            name_source: Text::word(self.name_source.as_deref()),
             pid,
-            session_id: self.session_id.clone(),
+            session_id: Text::verbatim(self.session_id.as_deref()),
             session_started_at: epoch_secs(self.started_at),
-            cwd: self.cwd.clone(),
-            permission_mode: crate::proc::permission_mode(pid),
+            cwd: Text::verbatim(self.cwd.as_deref()),
+            permission_mode: Text::word(crate::proc::permission_mode(pid).as_deref()),
         })
     }
 }
@@ -149,8 +149,8 @@ pub fn epoch_secs(ms: Option<i64>) -> u64 {
 /// is not an address that a consumer can use.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Zellij {
-    pub session: String,
-    pub pane: String,
+    pub session: Text,
+    pub pane: Text,
 }
 
 impl Zellij {
@@ -164,42 +164,51 @@ impl Zellij {
     ///
     /// A half that is empty is a half that is missing. `ZELLIJ_SESSION_NAME=` is a variable that
     /// carries no session, and an address with nothing in it is one that no consumer can attach
-    /// to.
+    /// to. A session name is [`Text::verbatim`] and not a word: the space in it is part of the
+    /// name that `zellij attach` wants.
     ///
     /// Separate from the read, because an environment is difficult to make on a real process and
     /// this decision is not.
     pub(crate) fn address(vars: (Option<String>, Option<String>)) -> Option<Self> {
         let (session, pane) = vars;
-        match (present(session), present(pane)) {
-            (Some(session), Some(pane)) => Some(Zellij { session, pane }),
-            _ => None,
-        }
+        Some(Zellij {
+            session: Text::verbatim(session.as_deref())?,
+            pane: Text::verbatim(pane.as_deref())?,
+        })
     }
 }
 
-/// A value that carries something, or `None` for one that does not.
+/// A value that a foreign source wrote: present, never empty, and otherwise verbatim.
 ///
-/// Verbatim otherwise, and not trimmed like a status word: the space in a zellij session name is
-/// part of the name that `zellij attach` wants.
-fn present(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
-}
-
-/// A status word from Claude Code: trimmed, never empty, and otherwise verbatim.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+/// Absence is `None`. An empty string is an absence that reads as data: it leaves as `""` in the
+/// JSON and as a blank cell in the table, and every consumer then handles a second spelling of
+/// nothing. The session file belongs to Claude Code and changes with its releases, so a key that
+/// carries a value today can carry an empty one tomorrow.
+///
+/// Two constructors, because the two kinds of value differ in one thing only. Both refuse
+/// emptiness, and only a word is trimmed.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(transparent)]
-pub struct StatusWord(String);
+pub struct Text(String);
 
-impl StatusWord {
-    /// The word in `raw`, or `None` when there is none.
-    pub fn parse(raw: Option<&str>) -> Option<Self> {
+impl Text {
+    /// A word from an open vocabulary: a status, a name source, a permission mode. The space
+    /// around such a word is not part of it.
+    pub fn word(raw: Option<&str>) -> Option<Self> {
         raw.map(str::trim)
             .filter(|word| !word.is_empty())
             .map(|word| Self(word.to_string()))
     }
+
+    /// A name, a path, an identifier: something that somebody else chose. Only emptiness goes.
+    /// A directory name can end in a space, and a trim names a different directory.
+    pub fn verbatim(raw: Option<&str>) -> Option<Self> {
+        raw.filter(|value| !value.is_empty())
+            .map(|value| Self(value.to_string()))
+    }
 }
 
-impl std::ops::Deref for StatusWord {
+impl std::ops::Deref for Text {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -210,41 +219,42 @@ impl std::ops::Deref for StatusWord {
 /// Agent information that is printed to stdout.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
-    pub status: Option<StatusWord>,
+    pub status: Option<Text>,
     pub status_age: u64,
     pub zellij: Option<Zellij>,
-    pub name: Option<String>,
-    pub name_source: Option<String>,
+    pub name: Option<Text>,
+    pub name_source: Option<Text>,
     pub pid: u32,
-    pub session_id: Option<String>,
+    pub session_id: Option<Text>,
     pub session_started_at: u64,
-    pub cwd: Option<String>,
+    pub cwd: Option<Text>,
     /// The permission mode that the command line of the agent asks for, and `None` for a
     /// command line that does not ask for one.
     ///
     /// This is the launch of the agent, and not the mode it runs under now. The command line
     /// of a process does not change, and a person cycles the mode during a session.
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<Text>,
 }
 
 #[cfg(test)]
 mod tests {
     fn agent() -> super::Agent {
         super::Agent {
-            status: super::StatusWord::parse(Some("waiting")),
+            status: super::Text::word(Some("waiting")),
             status_age: 35,
-            zellij: Some(super::Zellij {
-                session: "work".into(),
-                pane: "1".into(),
-            }),
-            name: Some("work-f8".into()),
-            name_source: Some("user".into()),
+            zellij: address("work", "1"),
+            name: super::Text::verbatim(Some("work-f8")),
+            name_source: super::Text::word(Some("user")),
             pid: 4242,
-            session_id: Some("abc-123".into()),
+            session_id: super::Text::verbatim(Some("abc-123")),
             session_started_at: 1_755_000_000,
-            cwd: Some("/home/you/src".into()),
-            permission_mode: Some("plan".into()),
+            cwd: super::Text::verbatim(Some("/home/you/src")),
+            permission_mode: super::Text::word(Some("plan")),
         }
+    }
+
+    fn address(session: &str, pane: &str) -> Option<super::Zellij> {
+        super::Zellij::address((Some(session.to_string()), Some(pane.to_string())))
     }
 
     #[test]
@@ -269,44 +279,32 @@ mod tests {
     /// reads this key to attach, and `:` is a pane of no session.
     #[test]
     fn a_half_of_an_address_with_nothing_in_it_is_a_half_that_is_missing() {
-        let of = |session: &str, pane: &str| {
-            super::Zellij::address((Some(session.to_string()), Some(pane.to_string())))
-        };
-
-        assert_eq!(of("", "1"), None);
-        assert_eq!(of("work", ""), None);
-        assert_eq!(of("", ""), None);
+        assert_eq!(address("", "1"), None);
+        assert_eq!(address("work", ""), None);
+        assert_eq!(address("", ""), None);
         assert_eq!(super::Zellij::address((None, None)), None);
     }
 
     #[test]
     fn a_whole_address_survives() {
-        assert_eq!(
-            super::Zellij::address((Some("work".into()), Some("1".into()))),
-            Some(super::Zellij {
-                session: "work".into(),
-                pane: "1".into()
-            })
-        );
+        let zellij = address("work", "1").expect("an address");
+        assert_eq!(&*zellij.session, "work");
+        assert_eq!(&*zellij.pane, "1");
     }
 
     /// A session name is an identifier that a person chose, and not a word from a vocabulary.
     /// Trimming it names a different session, and `zellij attach` then finds nothing.
     #[test]
     fn a_session_name_keeps_the_space_that_is_part_of_it() {
-        assert_eq!(
-            super::Zellij::address((Some(" my work ".into()), Some(" 1 ".into()))),
-            Some(super::Zellij {
-                session: " my work ".into(),
-                pane: " 1 ".into()
-            })
-        );
+        let zellij = address(" my work ", " 1 ").expect("an address");
+        assert_eq!(&*zellij.session, " my work ");
+        assert_eq!(&*zellij.pane, " 1 ");
     }
 
     #[test]
     fn an_agent_whose_address_was_empty_is_one_null_too() {
         let mut agent = agent();
-        agent.zellij = super::Zellij::address((Some(String::new()), Some(String::new())));
+        agent.zellij = address("", "");
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["zellij"], serde_json::Value::Null);
     }
@@ -314,7 +312,7 @@ mod tests {
     #[test]
     fn a_cwd_with_whitespace_needs_no_special_handling() {
         let mut agent = agent();
-        agent.cwd = Some("/home/you/my projects/thing".into());
+        agent.cwd = super::Text::verbatim(Some("/home/you/my projects/thing"));
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["cwd"], "/home/you/my projects/thing");
     }
@@ -324,12 +322,12 @@ mod tests {
     #[test]
     fn a_status_with_nothing_in_it_is_absent_and_not_an_empty_word() {
         for raw in ["", " ", "\t", "\n  "] {
-            assert_eq!(super::StatusWord::parse(Some(raw)), None);
+            assert_eq!(super::Text::word(Some(raw)), None);
         }
-        assert_eq!(super::StatusWord::parse(None), None);
+        assert_eq!(super::Text::word(None), None);
 
         let mut agent = agent();
-        agent.status = super::StatusWord::parse(Some("  "));
+        agent.status = super::Text::word(Some("  "));
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["status"], serde_json::Value::Null);
     }
@@ -339,11 +337,54 @@ mod tests {
     #[test]
     fn a_status_word_is_carried_through_verbatim() {
         for raw in ["waiting", "idle", "busy", "shell", "somethingNew"] {
-            let word = super::StatusWord::parse(Some(raw)).expect("a word");
+            let word = super::Text::word(Some(raw)).expect("a word");
             assert_eq!(&*word, raw);
             assert_eq!(serde_json::to_string(&word).unwrap(), format!(r#""{raw}""#));
         }
-        assert_eq!(&*super::StatusWord::parse(Some(" busy ")).unwrap(), "busy");
+        assert_eq!(&*super::Text::word(Some(" busy ")).unwrap(), "busy");
+    }
+
+    /// The same release of Claude Code that can clear a status can clear a name, an id or a
+    /// cwd. Every one of them leaves as `null`, which is the absence a consumer already reads.
+    #[test]
+    fn a_key_with_nothing_in_it_is_absent_for_all_of_them() {
+        let mut agent = agent();
+        agent.name = super::Text::verbatim(Some(""));
+        agent.name_source = super::Text::word(Some(""));
+        agent.session_id = super::Text::verbatim(Some(""));
+        agent.cwd = super::Text::verbatim(Some(""));
+        agent.permission_mode = super::Text::word(Some(""));
+
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        for key in [
+            "name",
+            "name_source",
+            "session_id",
+            "cwd",
+            "permission_mode",
+        ] {
+            assert_eq!(value[key], serde_json::Value::Null, "{key}");
+        }
+    }
+
+    /// A path is not a word. `/home/you/two spaces /` is a directory that exists, and a trim
+    /// names a different one, which a consumer then fails to open.
+    #[test]
+    fn a_word_is_trimmed_and_a_name_is_not() {
+        assert_eq!(&*super::Text::word(Some("  plan  ")).unwrap(), "plan");
+        assert_eq!(
+            &*super::Text::verbatim(Some("/home/you/two spaces / ")).unwrap(),
+            "/home/you/two spaces / "
+        );
+        assert_eq!(&*super::Text::verbatim(Some(" ")).unwrap(), " ");
+    }
+
+    /// The published JSON is the reason for `#[serde(transparent)]`: a value that was legal
+    /// before this type existed is byte for byte the value it was.
+    #[test]
+    fn a_narrowed_value_is_the_same_on_the_wire() {
+        let json = serde_json::to_string(&super::Text::verbatim(Some("work-f8"))).unwrap();
+        assert_eq!(json, r#""work-f8""#);
     }
 
     #[test]

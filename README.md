@@ -104,6 +104,15 @@ status against a fixed set of values. A consumer that shows only the values it
 knows hides live agents. `name_source` and `permission_mode` are open in the
 same way.
 
+**An empty value is an absence.** `claude-ps` never writes `""`. The session
+file belongs to Claude Code, and a release of it can clear a key that carried
+something before. Such a key leaves as `null`, which is the absence a consumer
+already reads. A value that carries something is passed through with no change:
+only the space around a `status`, a `name_source` and a `permission_mode` goes,
+because the space around a word is not part of the word. A `name`, a
+`session_id`, a `cwd`, and both halves of a `zellij` address are verbatim. A
+directory name can end in a space, and a trim names a different directory.
+
 **`name_source` says whether the name carries information.** A `derived` name is
 the basename of the `cwd` and a suffix, so a consumer that already shows the
 `cwd` shows it twice. Claude Code writes `user`, `peer`, `derived`, `collision`,

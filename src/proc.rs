@@ -111,6 +111,10 @@ pub fn permission_mode(pid: u32) -> Option<String> {
 /// Entries are compared whole, and never as a prefix of the argument.
 /// `--allow-dangerously-skip-permissions` is a different flag, which permits the bypass and
 /// does not perform it.
+///
+/// A flag with nothing after it gives an empty mode, and this parser reports it. What an empty
+/// value means is the decision of the parse boundary in [`crate::agent`], and a parser that
+/// hides one emptiness leaves the next one for somebody else to find.
 pub fn parse_permission_mode(raw: &[u8]) -> Option<String> {
     const FLAG: &[u8] = b"--permission-mode";
 
@@ -130,7 +134,7 @@ pub fn parse_permission_mode(raw: &[u8]) -> Option<String> {
             mode = Some(String::from_utf8_lossy(value).into_owned());
         }
     }
-    mode.filter(|mode| !mode.is_empty())
+    mode
 }
 
 #[cfg(test)]
@@ -258,6 +262,8 @@ mod tests {
         );
     }
 
+    /// `--permission-mode=` asks for a mode and names none. The parser reports the empty
+    /// value, and [`crate::agent::Text::word`] is the one place that decides it is an absence.
     #[test]
     fn a_flag_without_a_value_asks_for_no_mode() {
         assert_eq!(
@@ -265,9 +271,10 @@ mod tests {
             None
         );
         assert_eq!(
-            super::parse_permission_mode(b"claude\0--permission-mode=\0"),
-            None
+            super::parse_permission_mode(b"claude\0--permission-mode=\0").as_deref(),
+            Some("")
         );
+        assert_eq!(crate::agent::Text::word(Some("")), None);
     }
 
     /// The last one wins, which is what a shell alias that appends a flag produces.

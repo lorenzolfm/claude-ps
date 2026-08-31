@@ -48,7 +48,7 @@ fn row(agent: &crate::agent::Agent, now_secs: i64, home: &str) -> Row {
             .map_or_else(missing, |cwd| tilde(cwd, home)),
         agent.pid.to_string(),
         agent.zellij.as_ref().map_or_else(missing, |zellij| {
-            format!("{}:{}", zellij.session, zellij.pane)
+            format!("{}:{}", &*zellij.session, &*zellij.pane)
         }),
     ]
 }
@@ -191,20 +191,21 @@ fn duration(secs: u64) -> String {
 mod tests {
     fn agent(name: &str, pid: u32) -> crate::agent::Agent {
         crate::agent::Agent {
-            status: crate::agent::StatusWord::parse(Some("waiting")),
+            status: crate::agent::Text::word(Some("waiting")),
             status_age: 35,
-            zellij: Some(crate::agent::Zellij {
-                session: "work".into(),
-                pane: "1".into(),
-            }),
-            name: Some(name.into()),
-            name_source: Some("user".into()),
+            zellij: address("work", "1"),
+            name: crate::agent::Text::verbatim(Some(name)),
+            name_source: crate::agent::Text::word(Some("user")),
             pid,
-            session_id: Some("abc-123".into()),
+            session_id: crate::agent::Text::verbatim(Some("abc-123")),
             session_started_at: 1_755_000_000,
-            cwd: Some("/home/you/src".into()),
+            cwd: crate::agent::Text::verbatim(Some("/home/you/src")),
             permission_mode: None,
         }
+    }
+
+    fn address(session: &str, pane: &str) -> Option<crate::agent::Zellij> {
+        crate::agent::Zellij::address((Some(session.to_string()), Some(pane.to_string())))
     }
 
     #[test]
@@ -276,7 +277,7 @@ mod tests {
     #[test]
     fn an_address_with_nothing_in_it_is_a_dash_and_not_a_bare_colon() {
         let mut one = agent("x", 1);
-        one.zellij = crate::agent::Zellij::address((Some(String::new()), Some(String::new())));
+        one.zellij = address("", "");
         let table = super::table(&[one], 1_755_000_100, "/home/you");
         let row = table.lines().nth(3).unwrap();
         assert!(row.ends_with(" -"), "{row}");
@@ -289,7 +290,7 @@ mod tests {
     fn a_derived_name_carries_a_mark_and_a_chosen_name_does_not() {
         let marked = |source: Option<&str>| {
             let mut one = agent("work-f8", 1);
-            one.name_source = source.map(str::to_string);
+            one.name_source = crate::agent::Text::word(source);
             super::name(&one)
         };
 
@@ -308,14 +309,38 @@ mod tests {
     fn an_agent_without_a_name_is_a_dash_and_never_a_lone_mark() {
         let mut one = agent("x", 1);
         one.name = None;
-        one.name_source = Some("derived".into());
+        one.name_source = crate::agent::Text::word(Some("derived"));
         assert_eq!(super::name(&one), "-");
+    }
+
+    /// A name of `""` is a name that Claude Code cleared, and it reached this column as a lone
+    /// `~`: a mark that says a name was derived, standing where the name is not. It is the same
+    /// absence as a missing key, and the boundary now spells it that way.
+    #[test]
+    fn a_name_with_nothing_in_it_is_the_same_dash() {
+        let mut one = agent("x", 1);
+        one.name = crate::agent::Text::verbatim(Some(""));
+        one.name_source = crate::agent::Text::word(Some("derived"));
+        assert_eq!(super::name(&one), "-");
+    }
+
+    /// An empty cell reads as a column that ended. The row keeps the mark of every key that
+    /// the session file did not carry, whether the key was absent or carried nothing.
+    #[test]
+    fn a_cwd_with_nothing_in_it_is_a_dash_and_not_a_blank_cell() {
+        let mut one = agent("x", 1);
+        one.cwd = crate::agent::Text::verbatim(Some(""));
+        let table = super::table(&[one], 1_755_000_100, "/home/you");
+        assert_eq!(
+            table.lines().nth(3).unwrap(),
+            " x     waiting  35s   1m 40s  -     -      1  work:1"
+        );
     }
 
     #[test]
     fn the_permission_mode_has_a_column() {
         let mut one = agent("x", 1);
-        one.permission_mode = Some("bypassPermissions".into());
+        one.permission_mode = crate::agent::Text::word(Some("bypassPermissions"));
         let table = super::table(&[one], 1_755_000_100, "/home/you");
         assert!(table.contains("MODE"), "{table}");
         assert!(table.contains("bypassPermissions"), "{table}");
