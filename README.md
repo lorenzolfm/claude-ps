@@ -122,6 +122,8 @@ another agent chose. Show the `cwd` for every agent, and add the name when the
 source is one of those two, or when it is absent, which is the state before this
 key existed. Suppress a source you do not know rather than trusting it: the
 sources that carry a name are the short list, and the machinery is the long one.
+A `name_source` never comes without a `name`. A source is a fact about a name,
+and a session with no name reports `null` for both keys.
 
 **`permission_mode` is the launch, and not the mode now.** It comes from the
 command line of the agent, which does not change. A person who cycles the mode

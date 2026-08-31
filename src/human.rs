@@ -67,12 +67,13 @@ fn missing() -> String {
 /// Only `user` and `peer` are a chosen name. Every other source, the ones this tool does not
 /// know included, is machinery.
 fn name(agent: &crate::agent::Agent) -> String {
-    let Some(name) = agent.name.as_deref() else {
+    let Some(name) = agent.name.as_ref() else {
         return missing();
     };
-    match agent.name_source.as_deref() {
-        None | Some("user" | "peer") => name.to_string(),
-        Some(_) => format!("{name}~"),
+    let text = &*name.text;
+    match name.source.as_deref() {
+        None | Some("user" | "peer") => text.to_string(),
+        Some(_) => format!("{text}~"),
     }
 }
 
@@ -195,8 +196,7 @@ mod tests {
             status: crate::agent::Text::word(Some("waiting")),
             status_age: Some(35),
             zellij: address("work", "1"),
-            name: crate::agent::Text::verbatim(Some(name)),
-            name_source: crate::agent::Text::word(Some("user")),
+            name: crate::agent::Name::of(Some(name), Some("user")),
             pid,
             session_id: crate::agent::Text::verbatim(Some("abc-123")),
             session_started_at: Some(1_755_000_000),
@@ -292,7 +292,7 @@ mod tests {
     fn a_derived_name_carries_a_mark_and_a_chosen_name_does_not() {
         let marked = |source: Option<&str>| {
             let mut one = agent("work-f8", 1);
-            one.name_source = crate::agent::Text::word(source);
+            one.name = crate::agent::Name::of(Some("work-f8"), source);
             super::name(&one)
         };
 
@@ -310,8 +310,7 @@ mod tests {
     #[test]
     fn an_agent_without_a_name_is_a_dash_and_never_a_lone_mark() {
         let mut one = agent("x", 1);
-        one.name = None;
-        one.name_source = crate::agent::Text::word(Some("derived"));
+        one.name = crate::agent::Name::of(None, Some("derived"));
         assert_eq!(super::name(&one), "-");
     }
 
@@ -321,8 +320,7 @@ mod tests {
     #[test]
     fn a_name_with_nothing_in_it_is_the_same_dash() {
         let mut one = agent("x", 1);
-        one.name = crate::agent::Text::verbatim(Some(""));
-        one.name_source = crate::agent::Text::word(Some("derived"));
+        one.name = crate::agent::Name::of(Some(""), Some("derived"));
         assert_eq!(super::name(&one), "-");
     }
 

@@ -87,8 +87,7 @@ impl SessionFile {
             status: Text::word(self.status.as_deref()),
             status_age: status_age_secs(now_secs, self.status_set_at()),
             zellij: Zellij::of(pid),
-            name: Text::verbatim(self.name.as_deref()),
-            name_source: Text::word(self.name_source.as_deref()),
+            name: Name::of(self.name.as_deref(), self.name_source.as_deref()),
             pid,
             session_id: Text::verbatim(self.session_id.as_deref()),
             session_started_at: epoch_secs(self.started_at),
@@ -189,6 +188,48 @@ impl Zellij {
     }
 }
 
+/// The label of a session, and who chose it.
+///
+/// The same decision as [`Zellij`]: one object or nothing, and never one of the two. A source
+/// says whether the name carries information, and it has nothing to say about a name that is
+/// not there. The two keys stay two keys on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Name {
+    pub text: Text,
+    /// Who chose the name: `user`, `peer`, `derived`, and the ones a later release adds. Absent
+    /// is the state before Claude Code wrote this key, and it reads as a name that was chosen.
+    pub source: Option<Text>,
+}
+
+impl Name {
+    /// The name in a session file, or `None` for a file that carries none. A source without a
+    /// name goes with the name it describes.
+    pub fn of(name: Option<&str>, source: Option<&str>) -> Option<Self> {
+        Some(Name {
+            text: Text::verbatim(name)?,
+            source: Text::word(source),
+        })
+    }
+}
+
+/// `name` and `name_source` are two keys of the published object, and this is the one place that
+/// knows they are one value. A session without a name writes both as `null`, which is what the
+/// object carried before the two became one field.
+fn name_and_source<S: serde::Serializer>(
+    name: &Option<Name>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+
+    let mut map = serializer.serialize_map(Some(2))?;
+    map.serialize_entry("name", &name.as_ref().map(|name| &name.text))?;
+    map.serialize_entry(
+        "name_source",
+        &name.as_ref().and_then(|name| name.source.as_ref()),
+    )?;
+    map.end()
+}
+
 /// A value that a foreign source wrote: present, never empty, and otherwise verbatim.
 ///
 /// Absence is `None`. An empty string is an absence that reads as data: it leaves as `""` in the
@@ -236,8 +277,8 @@ pub struct Agent {
     #[serde(serialize_with = "zero_when_unknown")]
     pub status_age: Option<u64>,
     pub zellij: Option<Zellij>,
-    pub name: Option<Text>,
-    pub name_source: Option<Text>,
+    #[serde(flatten, serialize_with = "name_and_source")]
+    pub name: Option<Name>,
     pub pid: u32,
     pub session_id: Option<Text>,
     #[serde(serialize_with = "zero_when_unknown")]
@@ -258,8 +299,7 @@ mod tests {
             status: super::Text::word(Some("waiting")),
             status_age: Some(35),
             zellij: address("work", "1"),
-            name: super::Text::verbatim(Some("work-f8")),
-            name_source: super::Text::word(Some("user")),
+            name: super::Name::of(Some("work-f8"), Some("user")),
             pid: 4242,
             session_id: super::Text::verbatim(Some("abc-123")),
             session_started_at: Some(1_755_000_000),
@@ -364,8 +404,7 @@ mod tests {
     #[test]
     fn a_key_with_nothing_in_it_is_absent_for_all_of_them() {
         let mut agent = agent();
-        agent.name = super::Text::verbatim(Some(""));
-        agent.name_source = super::Text::word(Some(""));
+        agent.name = super::Name::of(Some(""), Some(""));
         agent.session_id = super::Text::verbatim(Some(""));
         agent.cwd = super::Text::verbatim(Some(""));
         agent.permission_mode = super::Text::word(Some(""));
@@ -531,6 +570,30 @@ mod tests {
     fn a_machine_that_cannot_say_its_domain_accepts_every_file() {
         assert!(super::is_local_domain(Some("linux:0123:pid:[1]"), None));
         assert!(super::is_local_domain(None, None));
+    }
+
+    /// A source is a fact about a name. `{"name": null, "name_source": "derived"}` says who
+    /// chose a name that no key carries, and a consumer that reads the source to decide whether
+    /// to show the name has nothing to show either way.
+    #[test]
+    fn a_source_without_a_name_is_no_name_at_all() {
+        assert_eq!(super::Name::of(None, Some("derived")), None);
+        assert_eq!(super::Name::of(Some(""), Some("derived")), None);
+
+        let mut agent = agent();
+        agent.name = super::Name::of(None, Some("derived"));
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["name"], serde_json::Value::Null);
+        assert_eq!(value["name_source"], serde_json::Value::Null);
+    }
+
+    /// A name that Claude Code wrote before it wrote a source. It is a name a person chose,
+    /// as far as anything here can say.
+    #[test]
+    fn a_name_without_a_source_is_still_a_name() {
+        let name = super::Name::of(Some("work-f8"), None).expect("a name");
+        assert_eq!(&*name.text, "work-f8");
+        assert_eq!(name.source, None);
     }
 
     /// A `derived` name is the basename of the cwd and a suffix, and a `user` name is a label
