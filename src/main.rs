@@ -16,7 +16,8 @@ object per agent:
 
   status              what Claude reports, verbatim (busy, idle, waiting, ...),
                       or null if Claude reports none
-  status_age          whole seconds in that status
+  status_age          whole seconds in that status, or 0 if no timestamp
+                      dates it
   zellij              {session, pane}, or null if the agent is not in zellij
   name                Claude's own label for the session
   name_source         who chose the name (user, derived, ...), or null

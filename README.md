@@ -41,7 +41,7 @@ There is no procfs on darwin, so the flake does not build for darwin.
 | Key | Content |
 |---|---|
 | `status` | What Claude reports, verbatim |
-| `status_age` | Whole seconds in that status |
+| `status_age` | Whole seconds in that status, or `0` if no timestamp dates it |
 | `zellij` | `{session, pane}`, or `null` if the agent is not in zellij. A variable that is set and empty carries no address, so it is `null` too |
 | `name` | Claude's own label for the session |
 | `name_source` | Who chose the name, or `null` |
@@ -88,8 +88,9 @@ this page. It shows the durations in hours and minutes, the home directory as
 `~`, and the zellij address as `session:pane`. A key that the session file does
 not have is `-`.
 
-`AGE` is the time in the current status. `ELAPSED` is the time since the
-session started. A `~` after a name marks a name that Claude derived rather
+`AGE` is the time in the current status, and `-` for a status that no
+timestamp dates, which the JSON cannot tell from a status of `0` seconds.
+`ELAPSED` is the time since the session started. A `~` after a name marks a name that Claude derived rather
 than a person chose, because such a name repeats the `CWD` on the same line.
 
 This table is for eyes only. The columns, the order, and the format of a value
@@ -104,6 +105,15 @@ status against a fixed set of values. A consumer that shows only the values it
 knows hides live agents. `name_source` and `permission_mode` are open in the
 same way.
 
+**An empty value is an absence.** `claude-ps` never writes `""`. The session
+file belongs to Claude Code, and a release of it can clear a key that carried
+something before. Such a key leaves as `null`, which is the absence a consumer
+already reads. A value that carries something is passed through with no change:
+only the space around a `status`, a `name_source` and a `permission_mode` goes,
+because the space around a word is not part of the word. A `name`, a
+`session_id`, a `cwd`, and both halves of a `zellij` address are verbatim. A
+directory name can end in a space, and a trim names a different directory.
+
 **`name_source` says whether the name carries information.** A `derived` name is
 the basename of the `cwd` and a suffix, so a consumer that already shows the
 `cwd` shows it twice. Claude Code writes `user`, `peer`, `derived`, `collision`,
@@ -112,6 +122,8 @@ another agent chose. Show the `cwd` for every agent, and add the name when the
 source is one of those two, or when it is absent, which is the state before this
 key existed. Suppress a source you do not know rather than trusting it: the
 sources that carry a name are the short list, and the machinery is the long one.
+A `name_source` never comes without a `name`. A source is a fact about a name,
+and a session with no name reports `null` for both keys.
 
 **`permission_mode` is the launch, and not the mode now.** It comes from the
 command line of the agent, which does not change. A person who cycles the mode
