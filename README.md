@@ -42,7 +42,7 @@ There is no procfs on darwin, so the flake does not build for darwin.
 |---|---|
 | `status` | What Claude reports, verbatim |
 | `status_age` | Whole seconds in that status |
-| `zellij` | `{session, pane}`, or `null` if the agent is not in zellij |
+| `zellij` | `{session, pane}`, or `null` if the agent is not in zellij. A variable that is set and empty carries no address, so it is `null` too |
 | `name` | Claude's own label for the session |
 | `name_source` | Who chose the name, or `null` |
 | `pid` | The process id |
@@ -146,7 +146,9 @@ pid. Sort the agents again if you show them to a person. The table of
 ## Zellij support
 
 If an agent runs in zellij, `claude-ps` reports the zellij session and pane in
-the `zellij` key. The value is `null` for an agent outside zellij.
+the `zellij` key. The value is `null` for an agent outside zellij, and for one
+whose `ZELLIJ_SESSION_NAME` or `ZELLIJ_PANE_ID` is set and empty: a variable
+with nothing in it carries no address to attach to.
 
 [luneta](https://github.com/lorenzolfm/luneta) uses this key. Its agent screen
 shows all running agents. `Enter` attaches to the session and focuses the pane.
