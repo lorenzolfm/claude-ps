@@ -4,6 +4,46 @@
 //! make on a real system: a `comm` that contains spaces and parentheses, and an environment
 //! entry that is not valid UTF-8.
 
+/// A pid that this tool compared against the session file that names it: the process is alive,
+/// and it started when the file says it started.
+///
+/// The field is private and [`live_pid`] is the only constructor, so a `/proc` read cannot be
+/// asked about a pid that nothing checked. Linux recycles pids, and the process behind an
+/// unchecked one is a stranger.
+///
+/// It does not close the window between the check and the read. The agent can exit in that
+/// window, and a pid that Linux hands out again reports the zellij session and the permission
+/// mode of somebody else. Closing that needs a second comparison of the start time after the
+/// reads; the window is microseconds wide.
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct LivePid(u32);
+
+impl LivePid {
+    /// A pid for a test. A test cannot make a process whose start time it knows, and this
+    /// constructor does not exist outside one.
+    #[cfg(test)]
+    pub fn unchecked(pid: u32) -> Self {
+        Self(pid)
+    }
+}
+
+impl std::fmt::Display for LivePid {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// The pid, once the start time of the process agrees with the one the session file recorded.
+///
+/// The caller says which start time to expect, because the file that recorded it is the concern
+/// of [`crate::agent`] and this module reads the kernel.
+pub fn live_pid(pid: u32, recorded_start: &str) -> Option<LivePid> {
+    (start_time(pid)? == recorded_start).then_some(LivePid(pid))
+}
+
+/// A bare pid, because [`start_time`] reads a pid that is not checked yet. Every function that
+/// this module publishes takes a [`LivePid`], which is where the invariant is kept.
 fn proc_path(pid: u32, leaf: &str) -> std::path::PathBuf {
     let mut path = std::path::PathBuf::from("/proc");
     path.push(pid.to_string());
@@ -15,7 +55,9 @@ fn proc_path(pid: u32, leaf: &str) -> std::path::PathBuf {
 ///
 /// A string and not a number: this tool only compares the value against the value that Claude
 /// Code recorded, and a conversion can change it.
-pub fn start_time(pid: u32) -> Option<String> {
+///
+/// The one read that takes a bare pid, because it is the read that checks the pid.
+fn start_time(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(proc_path(pid, "stat")).ok()?;
     parse_start_time(&stat).map(str::to_owned)
 }
@@ -33,8 +75,8 @@ pub fn parse_start_time(stat: &str) -> Option<&str> {
 
 /// The `(ZELLIJ_SESSION_NAME, ZELLIJ_PANE_ID)` of the agent, or `None` for each one that the
 /// agent does not have. Only the environment of the agent has these values.
-pub fn zellij_of(pid: u32) -> (Option<String>, Option<String>) {
-    match std::fs::read(proc_path(pid, "environ")) {
+pub fn zellij_of(pid: LivePid) -> (Option<String>, Option<String>) {
+    match std::fs::read(proc_path(pid.0, "environ")) {
         Ok(raw) => parse_environ(&raw),
         Err(_) => (None, None),
     }
@@ -92,8 +134,8 @@ fn machine_id() -> Option<String> {
 
 /// The permission mode that the command line of the agent asks for, or `None` for a command
 /// line that does not ask for one.
-pub fn permission_mode(pid: u32) -> Option<String> {
-    let raw = std::fs::read(proc_path(pid, "cmdline")).ok()?;
+pub fn permission_mode(pid: LivePid) -> Option<String> {
+    let raw = std::fs::read(proc_path(pid.0, "cmdline")).ok()?;
     parse_permission_mode(&raw)
 }
 
@@ -149,6 +191,24 @@ mod tests {
     /// Fields 3 to 21 of a real line, so the number of fields between the `)` and the start
     /// time comes from the kernel.
     const FIELDS_3_TO_21: &str = "R 1 1 1 0 -1 4194304 328 0 0 0 0 0 0 0 20 0 1 0";
+
+    /// The pid is a number in the JSON, and it was a number before the check had a type.
+    #[test]
+    fn a_checked_pid_is_a_bare_number() {
+        let pid = super::LivePid::unchecked(4242);
+        assert_eq!(serde_json::to_string(&pid).unwrap(), "4242");
+        assert_eq!(pid.to_string(), "4242");
+    }
+
+    /// A process that started at another time is another process, whatever the file says.
+    #[test]
+    fn a_pid_is_live_only_when_the_start_time_agrees() {
+        let Some(actual) = super::start_time(std::process::id()) else {
+            return;
+        };
+        assert!(super::live_pid(std::process::id(), &actual).is_some());
+        assert!(super::live_pid(std::process::id(), "0").is_none());
+    }
 
     #[test]
     fn start_time_is_field_22() {

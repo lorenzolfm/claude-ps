@@ -197,7 +197,7 @@ mod tests {
             status_age: Some(35),
             zellij: address("work", "1"),
             name: crate::agent::Name::of(Some(name), Some("user")),
-            pid,
+            pid: crate::proc::LivePid::unchecked(pid),
             session_id: crate::agent::Text::verbatim(Some("abc-123")),
             session_started_at: Some(1_755_000_000),
             cwd: crate::agent::Text::verbatim(Some("/home/you/src")),

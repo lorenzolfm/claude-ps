@@ -40,20 +40,21 @@ pub struct SessionFile {
 }
 
 impl SessionFile {
-    /// Whether the pid in this file is still the process that wrote the file.
+    /// The pid in this file, if it is still the process that wrote the file.
     ///
     /// All three conditions are necessary. A pid is a name in one pid namespace on one machine,
     /// so the domain has to agree before the pid means anything here. Linux then recycles pids,
     /// so a stale file can name a pid that now belongs to a different process, and the start
     /// time makes that check exact.
-    fn is_live(&self, pid: u32) -> bool {
+    ///
+    /// The answer is the checked pid and not a `bool`, because a [`crate::proc::LivePid`] is
+    /// what every read of `/proc` takes.
+    fn live_pid(&self, pid: u32) -> Option<crate::proc::LivePid> {
         if !self.is_local() {
-            return false;
+            return None;
         }
-        let Some(recorded) = self.proc_start.as_ref().map(json_scalar) else {
-            return false;
-        };
-        crate::proc::start_time(pid).is_some_and(|actual| actual == recorded)
+        let recorded = self.proc_start.as_ref().map(json_scalar)?;
+        crate::proc::live_pid(pid, &recorded)
     }
 
     /// Whether [`SessionFile::pid`] counts in the pid namespace of this process.
@@ -79,10 +80,7 @@ impl SessionFile {
 
     /// The agent for this file, or `None` if the process behind it is gone.
     pub fn agent(&self, now_secs: i64) -> Option<Agent> {
-        let pid = self.pid?;
-        if !self.is_live(pid) {
-            return None;
-        }
+        let pid = self.live_pid(self.pid?)?;
         Some(Agent {
             status: Text::word(self.status.as_deref()),
             status_age: status_age_secs(now_secs, self.status_set_at()),
@@ -166,7 +164,7 @@ pub struct Zellij {
 impl Zellij {
     /// Read from the environment of the agent. The session file gives the status of an agent
     /// and says nothing about zellij.
-    fn of(pid: u32) -> Option<Self> {
+    fn of(pid: crate::proc::LivePid) -> Option<Self> {
         Self::address(crate::proc::zellij_of(pid))
     }
 
@@ -279,7 +277,7 @@ pub struct Agent {
     pub zellij: Option<Zellij>,
     #[serde(flatten, serialize_with = "name_and_source")]
     pub name: Option<Name>,
-    pub pid: u32,
+    pub pid: crate::proc::LivePid,
     pub session_id: Option<Text>,
     #[serde(serialize_with = "zero_when_unknown")]
     pub session_started_at: Option<u64>,
@@ -300,7 +298,7 @@ mod tests {
             status_age: Some(35),
             zellij: address("work", "1"),
             name: super::Name::of(Some("work-f8"), Some("user")),
-            pid: 4242,
+            pid: crate::proc::LivePid::unchecked(4242),
             session_id: super::Text::verbatim(Some("abc-123")),
             session_started_at: Some(1_755_000_000),
             cwd: super::Text::verbatim(Some("/home/you/src")),
