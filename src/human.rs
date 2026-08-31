@@ -271,6 +271,18 @@ mod tests {
         );
     }
 
+    /// A bare `:` in this column is what a person reports as the bug. It is a pane of no
+    /// session, and the address it came from is no address at all.
+    #[test]
+    fn an_address_with_nothing_in_it_is_a_dash_and_not_a_bare_colon() {
+        let mut one = agent("x", 1);
+        one.zellij = crate::agent::Zellij::address((Some(String::new()), Some(String::new())));
+        let table = super::table(&[one], 1_755_000_100, "/home/you");
+        let row = table.lines().nth(3).unwrap();
+        assert!(row.ends_with(" -"), "{row}");
+        assert!(!row.contains(':'), "{row}");
+    }
+
     /// The table prints the cwd on every line, so a derived name repeats it. Only a name that
     /// a person or a peer chose stands without the mark.
     #[test]

@@ -157,11 +157,32 @@ impl Zellij {
     /// Read from the environment of the agent. The session file gives the status of an agent
     /// and says nothing about zellij.
     fn of(pid: u32) -> Option<Self> {
-        match crate::proc::zellij_of(pid) {
+        Self::address(crate::proc::zellij_of(pid))
+    }
+
+    /// The address in a pair of environment values, or `None` when a half of it is missing.
+    ///
+    /// A half that is empty is a half that is missing. `ZELLIJ_SESSION_NAME=` is a variable that
+    /// carries no session, and an address with nothing in it is one that no consumer can attach
+    /// to.
+    ///
+    /// Separate from the read, because an environment is difficult to make on a real process and
+    /// this decision is not.
+    pub(crate) fn address(vars: (Option<String>, Option<String>)) -> Option<Self> {
+        let (session, pane) = vars;
+        match (present(session), present(pane)) {
             (Some(session), Some(pane)) => Some(Zellij { session, pane }),
             _ => None,
         }
     }
+}
+
+/// A value that carries something, or `None` for one that does not.
+///
+/// Verbatim otherwise, and not trimmed like a status word: the space in a zellij session name is
+/// part of the name that `zellij attach` wants.
+fn present(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
 }
 
 /// A status word from Claude Code: trimmed, never empty, and otherwise verbatim.
@@ -239,6 +260,53 @@ mod tests {
     fn an_agent_outside_zellij_is_one_null() {
         let mut agent = agent();
         agent.zellij = None;
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["zellij"], serde_json::Value::Null);
+    }
+
+    /// Anything that launches an agent can set `ZELLIJ_SESSION_NAME=` -- a wrapper script, a
+    /// systemd unit -- and a variable that is present carries no address on its own. Luneta
+    /// reads this key to attach, and `:` is a pane of no session.
+    #[test]
+    fn a_half_of_an_address_with_nothing_in_it_is_a_half_that_is_missing() {
+        let of = |session: &str, pane: &str| {
+            super::Zellij::address((Some(session.to_string()), Some(pane.to_string())))
+        };
+
+        assert_eq!(of("", "1"), None);
+        assert_eq!(of("work", ""), None);
+        assert_eq!(of("", ""), None);
+        assert_eq!(super::Zellij::address((None, None)), None);
+    }
+
+    #[test]
+    fn a_whole_address_survives() {
+        assert_eq!(
+            super::Zellij::address((Some("work".into()), Some("1".into()))),
+            Some(super::Zellij {
+                session: "work".into(),
+                pane: "1".into()
+            })
+        );
+    }
+
+    /// A session name is an identifier that a person chose, and not a word from a vocabulary.
+    /// Trimming it names a different session, and `zellij attach` then finds nothing.
+    #[test]
+    fn a_session_name_keeps_the_space_that_is_part_of_it() {
+        assert_eq!(
+            super::Zellij::address((Some(" my work ".into()), Some(" 1 ".into()))),
+            Some(super::Zellij {
+                session: " my work ".into(),
+                pane: " 1 ".into()
+            })
+        );
+    }
+
+    #[test]
+    fn an_agent_whose_address_was_empty_is_one_null_too() {
+        let mut agent = agent();
+        agent.zellij = super::Zellij::address((Some(String::new()), Some(String::new())));
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["zellij"], serde_json::Value::Null);
     }
