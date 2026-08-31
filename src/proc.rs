@@ -115,12 +115,19 @@ pub fn permission_mode(pid: u32) -> Option<String> {
 /// A flag with nothing after it gives an empty mode, and this parser reports it. What an empty
 /// value means is the decision of the parse boundary in [`crate::agent`], and a parser that
 /// hides one emptiness leaves the next one for somebody else to find.
+///
+/// A bare `--` ends the flags, and the scan stops there. `claude -p -- --permission-mode plan`
+/// asks a question about a flag and does not set one.
 pub fn parse_permission_mode(raw: &[u8]) -> Option<String> {
     const FLAG: &[u8] = b"--permission-mode";
 
     let mut mode = None;
     let mut args = raw.split(|byte| *byte == 0);
     while let Some(arg) = args.next() {
+        // Everything after a bare `--` is a prompt for the agent, and a prompt is not a flag.
+        if arg == b"--" {
+            break;
+        }
         if arg == b"--dangerously-skip-permissions" {
             return Some("bypassPermissions".to_owned());
         }
@@ -250,6 +257,33 @@ mod tests {
             )
             .as_deref(),
             Some("bypassPermissions")
+        );
+    }
+
+    /// `claude -p -- --dangerously-skip-permissions` asks the agent about the flag. Reading it
+    /// as the flag reports a bypass for an agent that runs under none, and a person who reads
+    /// the list acts on a danger that is not there.
+    #[test]
+    fn a_prompt_after_a_double_dash_is_not_a_flag() {
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0-p\0--\0--dangerously-skip-permissions\0"),
+            None
+        );
+        assert_eq!(
+            super::parse_permission_mode(b"claude\0-p\0--\0--permission-mode\0plan\0"),
+            None
+        );
+    }
+
+    /// The terminator ends the flags and does not undo the ones before it.
+    #[test]
+    fn a_mode_before_the_double_dash_still_counts() {
+        assert_eq!(
+            super::parse_permission_mode(
+                b"claude\0--permission-mode\0plan\0--\0--dangerously-skip-permissions\0"
+            )
+            .as_deref(),
+            Some("plan")
         );
     }
 
