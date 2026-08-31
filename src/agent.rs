@@ -15,8 +15,9 @@ pub struct SessionFile {
     /// `linux:b2ebdff1356e437dae8ff5f78c20e8ff:pid:[4026531836]`. Compared against this
     /// machine before the pid is used at all.
     pub pid_domain: Option<String>,
-    /// Passed through verbatim. The vocabulary is open and changes with the version of Claude
-    /// Code, so this tool does not compare the status against a known set of values.
+    /// The raw read. The vocabulary is open and changes with the version of Claude Code, so this
+    /// tool does not compare the status against a known set of values. [`StatusWord`] is what
+    /// leaves this tool.
     pub status: Option<String>,
     /// Claude's own label for the session, for example `zellij-f8`. This is the basename of the
     /// cwd and a suffix. It is not the zellij session name.
@@ -83,7 +84,7 @@ impl SessionFile {
             return None;
         }
         Some(Agent {
-            status: self.status.clone(),
+            status: StatusWord::parse(self.status.as_deref()),
             status_age: status_age_secs(now_secs, self.status_set_at()),
             zellij: Zellij::of(pid),
             name: self.name.clone(),
@@ -163,10 +164,32 @@ impl Zellij {
     }
 }
 
+/// A status word from Claude Code: trimmed, never empty, and otherwise verbatim.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct StatusWord(String);
+
+impl StatusWord {
+    /// The word in `raw`, or `None` when there is none.
+    pub fn parse(raw: Option<&str>) -> Option<Self> {
+        raw.map(str::trim)
+            .filter(|word| !word.is_empty())
+            .map(|word| Self(word.to_string()))
+    }
+}
+
+impl std::ops::Deref for StatusWord {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Agent information that is printed to stdout.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
-    pub status: Option<String>,
+    pub status: Option<StatusWord>,
     pub status_age: u64,
     pub zellij: Option<Zellij>,
     pub name: Option<String>,
@@ -187,7 +210,7 @@ pub struct Agent {
 mod tests {
     fn agent() -> super::Agent {
         super::Agent {
-            status: Some("waiting".into()),
+            status: super::StatusWord::parse(Some("waiting")),
             status_age: 35,
             zellij: Some(super::Zellij {
                 session: "work".into(),
@@ -226,6 +249,33 @@ mod tests {
         agent.cwd = Some("/home/you/my projects/thing".into());
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["cwd"], "/home/you/my projects/thing");
+    }
+
+    /// Claude Code writes `status` as a free string, and a string with nothing in it is not a
+    /// status. It leaves as `null`, which is the absence every consumer already handles.
+    #[test]
+    fn a_status_with_nothing_in_it_is_absent_and_not_an_empty_word() {
+        for raw in ["", " ", "\t", "\n  "] {
+            assert_eq!(super::StatusWord::parse(Some(raw)), None);
+        }
+        assert_eq!(super::StatusWord::parse(None), None);
+
+        let mut agent = agent();
+        agent.status = super::StatusWord::parse(Some("  "));
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["status"], serde_json::Value::Null);
+    }
+
+    /// A word is otherwise the word Claude wrote, including one this tool does not know. Only
+    /// the space around it goes.
+    #[test]
+    fn a_status_word_is_carried_through_verbatim() {
+        for raw in ["waiting", "idle", "busy", "shell", "somethingNew"] {
+            let word = super::StatusWord::parse(Some(raw)).expect("a word");
+            assert_eq!(&*word, raw);
+            assert_eq!(serde_json::to_string(&word).unwrap(), format!(r#""{raw}""#));
+        }
+        assert_eq!(&*super::StatusWord::parse(Some(" busy ")).unwrap(), "busy");
     }
 
     #[test]
