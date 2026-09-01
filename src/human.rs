@@ -1,12 +1,3 @@
-//! The same agents, as a table for a person.
-//!
-//! This format is for eyes only. It has no stability rule: a column can move, and a value can
-//! become shorter. A consumer reads the JSON.
-
-/// The agents as a table between rules, or `no agents` if the list is empty.
-///
-/// The order is by name and then by pid, and not the pid order of the JSON. The JSON order is
-/// for a small diff. A person looks for a name.
 pub fn table(agents: &[crate::agent::Agent], now_secs: i64, home: &str) -> String {
     if agents.is_empty() {
         return "no agents\n".to_string();
@@ -22,7 +13,6 @@ pub fn table(agents: &[crate::agent::Agent], now_secs: i64, home: &str) -> Strin
     render(&HEADER.map(str::to_string), &rows)
 }
 
-/// One cell for each column, in the order of [`HEADER`].
 type Row = [String; COLUMNS];
 
 const COLUMNS: usize = 8;
@@ -31,8 +21,6 @@ const HEADER: [&str; COLUMNS] = [
     "NAME", "STATUS", "AGE", "ELAPSED", "MODE", "CWD", "PID", "ZELLIJ",
 ];
 
-/// The columns that hold a number or a duration. They are aligned to the right, so that the
-/// digits of one column are above each other and two agents compare by eye.
 const RIGHT_ALIGNED: [bool; COLUMNS] = [false, false, true, true, false, false, true, false];
 
 fn row(agent: &crate::agent::Agent, now_secs: i64, home: &str) -> Row {
@@ -53,19 +41,10 @@ fn row(agent: &crate::agent::Agent, now_secs: i64, home: &str) -> Row {
     ]
 }
 
-/// The mark for a value that the session file does not have. An empty cell reads as a column
-/// that ended, and this tool prints the missing value of every key.
 fn missing() -> String {
     "-".to_string()
 }
 
-/// The name, and a `~` after a name that Claude derived rather than a person chose.
-///
-/// This table prints the cwd on every line, and a derived name is the basename of that cwd and
-/// a suffix. The mark says which names carry something the cwd does not.
-///
-/// Only `user` and `peer` are a chosen name. Every other source, the ones this tool does not
-/// know included, is machinery.
 fn name(agent: &crate::agent::Agent) -> String {
     let Some(name) = agent.name.as_ref() else {
         return missing();
@@ -81,10 +60,6 @@ fn text(value: Option<&str>) -> String {
     value.map_or_else(missing, str::to_string)
 }
 
-/// The header between two rules, the rows, and a rule below, in the style of `tokei`.
-///
-/// Each column is as wide as its widest cell, the header included. The rules are as wide as the
-/// full table, so the eye finds the right edge of the last column.
 fn render(header: &Row, rows: &[Row]) -> String {
     let mut widths = [0usize; COLUMNS];
     for row in std::iter::once(header).chain(rows) {
@@ -93,7 +68,6 @@ fn render(header: &Row, rows: &[Row]) -> String {
         }
     }
 
-    // One space before the first column, two between the columns.
     let rule = "=".repeat(1 + widths.iter().sum::<usize>() + 2 * (COLUMNS - 1));
 
     let mut out = String::new();
@@ -110,8 +84,6 @@ fn render(header: &Row, rows: &[Row]) -> String {
     out
 }
 
-/// One line of cells. The last column carries no padding to its right, so a long `zellij` name
-/// adds no trailing spaces.
 fn line(row: &Row, widths: &[usize; COLUMNS]) -> String {
     let mut out = String::from(" ");
     for (column, cell) in row.iter().enumerate() {
@@ -133,10 +105,6 @@ fn line(row: &Row, widths: &[usize; COLUMNS]) -> String {
     out
 }
 
-/// The home directory as `~`, because the same prefix on every line carries no information.
-///
-/// Only an exact match of a full path component. A home of `/home/you` does not shorten
-/// `/home/younger`.
 fn tilde(path: &str, home: &str) -> String {
     if home.is_empty() {
         return path.to_string();
@@ -153,11 +121,6 @@ fn tilde(path: &str, home: &str) -> String {
     }
 }
 
-/// How long the session runs, from a start in epoch seconds.
-///
-/// A session that carries no start prints as the missing value, like every other key that the
-/// session file does not have. A clock that moved back gives a start in the future, which prints
-/// as `0s` and not as a large number.
 fn elapsed(started_at: Option<u64>, now_secs: i64) -> String {
     let Some(started_at) = started_at else {
         return missing();
@@ -166,10 +129,6 @@ fn elapsed(started_at: Option<u64>, now_secs: i64) -> String {
     duration(now.saturating_sub(started_at))
 }
 
-/// Whole seconds as the two largest units that are not zero, for example `2h 5m`.
-///
-/// Two units, because the second unit says if the first one is about to change, and a third unit
-/// is noise at that scale.
 fn duration(secs: u64) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
@@ -274,8 +233,6 @@ mod tests {
         );
     }
 
-    /// A bare `:` in this column is what a person reports as the bug. It is a pane of no
-    /// session, and the address it came from is no address at all.
     #[test]
     fn an_address_with_nothing_in_it_is_a_dash_and_not_a_bare_colon() {
         let mut one = agent("x", 1);
@@ -286,8 +243,6 @@ mod tests {
         assert!(!row.contains(':'), "{row}");
     }
 
-    /// The table prints the cwd on every line, so a derived name repeats it. Only a name that
-    /// a person or a peer chose stands without the mark.
     #[test]
     fn a_derived_name_carries_a_mark_and_a_chosen_name_does_not() {
         let marked = |source: Option<&str>| {
@@ -314,9 +269,6 @@ mod tests {
         assert_eq!(super::name(&one), "-");
     }
 
-    /// A name of `""` is a name that Claude Code cleared, and it reached this column as a lone
-    /// `~`: a mark that says a name was derived, standing where the name is not. It is the same
-    /// absence as a missing key, and the boundary now spells it that way.
     #[test]
     fn a_name_with_nothing_in_it_is_the_same_dash() {
         let mut one = agent("x", 1);
@@ -324,8 +276,6 @@ mod tests {
         assert_eq!(super::name(&one), "-");
     }
 
-    /// An empty cell reads as a column that ended. The row keeps the mark of every key that
-    /// the session file did not carry, whether the key was absent or carried nothing.
     #[test]
     fn a_cwd_with_nothing_in_it_is_a_dash_and_not_a_blank_cell() {
         let mut one = agent("x", 1);
@@ -384,9 +334,6 @@ mod tests {
         assert_eq!(super::elapsed(Some(1_755_000_100), 1_755_000_000), "0s");
     }
 
-    /// `0s` in this column is a status that changed a moment ago, and a person reads it that
-    /// way. A status that no timestamp dates is not that, and it carries the mark of a value
-    /// the session file does not have.
     #[test]
     fn an_undated_status_is_a_dash_and_not_a_fresh_zero() {
         let mut undated = agent("x", 1);
