@@ -1,107 +1,54 @@
-//! The session file Claude Code writes, and the agent this tool prints for it.
-
-/// `~/.claude/sessions/<pid>.json`, as much of it as this tool reads.
-///
-/// All fields are optional, and unknown fields are ignored. This schema belongs to Claude Code
-/// and changes with its releases. A field that goes away costs one key, and not the agent.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFile {
     pub pid: Option<u32>,
-    /// Compared against `/proc/<pid>/stat` to find if the process is alive. Untyped, because
-    /// Claude Code can write this value as a number or as a string.
     pub proc_start: Option<serde_json::Value>,
-    /// The machine and the pid namespace that [`SessionFile::pid`] is a name in, for example
-    /// `linux:b2ebdff1356e437dae8ff5f78c20e8ff:pid:[4026531836]`. Compared against this
-    /// machine before the pid is used at all.
     pub pid_domain: Option<String>,
-    /// The raw read. The vocabulary is open and changes with the version of Claude Code, so this
-    /// tool does not compare the status against a known set of values. [`StatusWord`] is what
-    /// leaves this tool.
     pub status: Option<String>,
-    /// Claude's own label for the session, for example `zellij-f8`. This is the basename of the
-    /// cwd and a suffix. It is not the zellij session name.
     pub name: Option<String>,
-    /// Who chose the name: `user`, `peer`, `derived`, `collision`, `auto`, or `hook`. Passed
-    /// through verbatim, and the vocabulary is open, like the status vocabulary.
-    ///
-    /// It says whether the name carries information. A `derived` name is the basename of the
-    /// cwd and a suffix, which a consumer that already shows the cwd shows twice.
     pub name_source: Option<String>,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
-    /// Epoch milliseconds. The first of these three fields that is present dates the status.
     pub status_updated_at: Option<i64>,
     pub updated_at: Option<i64>,
-    /// Epoch milliseconds when the session started. It dates the status as a last resort, and it
-    /// is also an output key: a new session and a session that completed a turn are both `idle`
-    /// with a small `status_age`, and only this field makes them different.
     pub started_at: Option<i64>,
 }
 
 impl SessionFile {
-    /// Whether the pid in this file is still the process that wrote the file.
-    ///
-    /// All three conditions are necessary. A pid is a name in one pid namespace on one machine,
-    /// so the domain has to agree before the pid means anything here. Linux then recycles pids,
-    /// so a stale file can name a pid that now belongs to a different process, and the start
-    /// time makes that check exact.
-    fn is_live(&self, pid: u32) -> bool {
+    fn live_pid(&self, pid: u32) -> Option<crate::proc::LivePid> {
         if !self.is_local() {
-            return false;
+            return None;
         }
-        let Some(recorded) = self.proc_start.as_ref().map(json_scalar) else {
-            return false;
-        };
-        crate::proc::start_time(pid).is_some_and(|actual| actual == recorded)
+        let recorded = self.proc_start.as_ref().map(json_scalar)?;
+        crate::proc::live_pid(pid, &recorded)
     }
 
-    /// Whether [`SessionFile::pid`] counts in the pid namespace of this process.
-    ///
-    /// A file that a container wrote, or that another machine wrote onto a shared home, names a
-    /// pid that belongs to a stranger here. `procStart` alone does not catch that: this tool
-    /// compares the start time of the stranger against a value it did not write, and two
-    /// processes that started in the same clock tick agree.
-    ///
-    /// A file without the key, and a machine that cannot say which domain it is, are both
-    /// accepted. Both are the state before this key existed, and hiding every agent is worse
-    /// than the collision this guards against.
     fn is_local(&self) -> bool {
         is_local_domain(self.pid_domain.as_deref(), crate::proc::local_pid_domain())
     }
 
-    /// Milliseconds since the epoch that the current status was set, if it is known at all.
     fn status_set_at(&self) -> Option<i64> {
         self.status_updated_at
             .or(self.updated_at)
             .or(self.started_at)
     }
 
-    /// The agent for this file, or `None` if the process behind it is gone.
     pub fn agent(&self, now_secs: i64) -> Option<Agent> {
-        let pid = self.pid?;
-        if !self.is_live(pid) {
-            return None;
-        }
+        let pid = self.live_pid(self.pid?)?;
         Some(Agent {
-            status: StatusWord::parse(self.status.as_deref()),
+            status: Text::word(self.status.as_deref()),
             status_age: status_age_secs(now_secs, self.status_set_at()),
             zellij: Zellij::of(pid),
-            name: self.name.clone(),
-            name_source: self.name_source.clone(),
+            name: Name::of(self.name.as_deref(), self.name_source.as_deref()),
             pid,
-            session_id: self.session_id.clone(),
+            session_id: Text::verbatim(self.session_id.as_deref()),
             session_started_at: epoch_secs(self.started_at),
-            cwd: self.cwd.clone(),
-            permission_mode: crate::proc::permission_mode(pid),
+            cwd: Text::verbatim(self.cwd.as_deref()),
+            permission_mode: Text::word(crate::proc::permission_mode(pid).as_deref()),
         })
     }
 }
 
-/// Whether a recorded pid domain is the domain of this process.
-///
-/// The two reads of the environment are arguments, so that the decision is testable on a machine
-/// that cannot say which domain it is. A build sandbox without an `/etc/machine-id` is one.
 fn is_local_domain(recorded: Option<&str>, local: Option<&str>) -> bool {
     match (recorded, local) {
         (Some(recorded), Some(local)) => recorded == local,
@@ -109,8 +56,6 @@ fn is_local_domain(recorded: Option<&str>, local: Option<&str>) -> bool {
     }
 }
 
-/// A JSON scalar as the shortest string that round-trips it, so a `procStart` of `987654` and a
-/// `procStart` of `"987654"` compare equal.
 fn json_scalar(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
@@ -119,87 +64,91 @@ fn json_scalar(value: &serde_json::Value) -> String {
     }
 }
 
-/// Whole seconds in the current status.
-///
-/// An unknown timestamp gives a status age of `0`. A missing field read as epoch millisecond `0`
-/// would show every agent in its status for approximately 57 years, which looks like data and not
-/// like a fault.
-pub fn status_age_secs(now_secs: i64, status_set_at_ms: Option<i64>) -> u64 {
-    let Some(set_at_ms) = status_set_at_ms else {
-        return 0;
-    };
+pub fn status_age_secs(now_secs: i64, status_set_at_ms: Option<i64>) -> Option<u64> {
+    let set_at_ms = status_set_at_ms?;
     let elapsed_ms = now_secs.saturating_mul(1000).saturating_sub(set_at_ms);
-    u64::try_from(elapsed_ms / 1000).unwrap_or(0)
+    Some(u64::try_from(elapsed_ms / 1000).unwrap_or(0))
 }
 
-/// Epoch seconds for a timestamp that Claude Code writes in milliseconds.
-///
-/// An absent timestamp gives `0`, for the same reason as [`status_age_secs`]. A consumer that
-/// hides new sessions then computes a very large session age, so it hides nothing.
-pub fn epoch_secs(ms: Option<i64>) -> u64 {
-    let Some(ms) = ms else {
-        return 0;
-    };
-    u64::try_from(ms / 1000).unwrap_or(0)
+pub fn epoch_secs(ms: Option<i64>) -> Option<u64> {
+    Some(u64::try_from(ms?).ok()? / 1000)
 }
 
-/// Where an agent runs in zellij.
-///
-/// The two fields are one object or nothing, and never one of the two. A session without a pane
-/// is not an address that a consumer can use.
+fn zero_when_unknown<S: serde::Serializer>(
+    secs: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u64(secs.unwrap_or(0))
+}
+
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Zellij {
-    pub session: String,
-    pub pane: String,
+    pub session: Text,
+    pub pane: Text,
 }
 
 impl Zellij {
-    /// Read from the environment of the agent. The session file gives the status of an agent
-    /// and says nothing about zellij.
-    fn of(pid: u32) -> Option<Self> {
+    fn of(pid: crate::proc::LivePid) -> Option<Self> {
         Self::address(crate::proc::zellij_of(pid))
     }
 
-    /// The address in a pair of environment values, or `None` when a half of it is missing.
-    ///
-    /// A half that is empty is a half that is missing. `ZELLIJ_SESSION_NAME=` is a variable that
-    /// carries no session, and an address with nothing in it is one that no consumer can attach
-    /// to.
-    ///
-    /// Separate from the read, because an environment is difficult to make on a real process and
-    /// this decision is not.
     pub(crate) fn address(vars: (Option<String>, Option<String>)) -> Option<Self> {
         let (session, pane) = vars;
-        match (present(session), present(pane)) {
-            (Some(session), Some(pane)) => Some(Zellij { session, pane }),
-            _ => None,
-        }
+        Some(Zellij {
+            session: Text::verbatim(session.as_deref())?,
+            pane: Text::verbatim(pane.as_deref())?,
+        })
     }
 }
 
-/// A value that carries something, or `None` for one that does not.
-///
-/// Verbatim otherwise, and not trimmed like a status word: the space in a zellij session name is
-/// part of the name that `zellij attach` wants.
-fn present(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Name {
+    pub text: Text,
+    pub source: Option<Text>,
 }
 
-/// A status word from Claude Code: trimmed, never empty, and otherwise verbatim.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
-#[serde(transparent)]
-pub struct StatusWord(String);
+impl Name {
+    pub fn of(name: Option<&str>, source: Option<&str>) -> Option<Self> {
+        Some(Name {
+            text: Text::verbatim(name)?,
+            source: Text::word(source),
+        })
+    }
+}
 
-impl StatusWord {
-    /// The word in `raw`, or `None` when there is none.
-    pub fn parse(raw: Option<&str>) -> Option<Self> {
+fn name_and_source<S: serde::Serializer>(
+    name: &Option<Name>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+
+    let mut map = serializer.serialize_map(Some(2))?;
+    map.serialize_entry("name", &name.as_ref().map(|name| &name.text))?;
+    map.serialize_entry(
+        "name_source",
+        &name.as_ref().and_then(|name| name.source.as_ref()),
+    )?;
+    map.end()
+}
+
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct Text(String);
+
+impl Text {
+    pub fn word(raw: Option<&str>) -> Option<Self> {
         raw.map(str::trim)
             .filter(|word| !word.is_empty())
             .map(|word| Self(word.to_string()))
     }
+
+    pub fn verbatim(raw: Option<&str>) -> Option<Self> {
+        raw.filter(|value| !value.is_empty())
+            .map(|value| Self(value.to_string()))
+    }
 }
 
-impl std::ops::Deref for StatusWord {
+impl std::ops::Deref for Text {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -207,44 +156,40 @@ impl std::ops::Deref for StatusWord {
     }
 }
 
-/// Agent information that is printed to stdout.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
-    pub status: Option<StatusWord>,
-    pub status_age: u64,
+    pub status: Option<Text>,
+    #[serde(serialize_with = "zero_when_unknown")]
+    pub status_age: Option<u64>,
     pub zellij: Option<Zellij>,
-    pub name: Option<String>,
-    pub name_source: Option<String>,
-    pub pid: u32,
-    pub session_id: Option<String>,
-    pub session_started_at: u64,
-    pub cwd: Option<String>,
-    /// The permission mode that the command line of the agent asks for, and `None` for a
-    /// command line that does not ask for one.
-    ///
-    /// This is the launch of the agent, and not the mode it runs under now. The command line
-    /// of a process does not change, and a person cycles the mode during a session.
-    pub permission_mode: Option<String>,
+    #[serde(flatten, serialize_with = "name_and_source")]
+    pub name: Option<Name>,
+    pub pid: crate::proc::LivePid,
+    pub session_id: Option<Text>,
+    #[serde(serialize_with = "zero_when_unknown")]
+    pub session_started_at: Option<u64>,
+    pub cwd: Option<Text>,
+    pub permission_mode: Option<Text>,
 }
 
 #[cfg(test)]
 mod tests {
     fn agent() -> super::Agent {
         super::Agent {
-            status: super::StatusWord::parse(Some("waiting")),
-            status_age: 35,
-            zellij: Some(super::Zellij {
-                session: "work".into(),
-                pane: "1".into(),
-            }),
-            name: Some("work-f8".into()),
-            name_source: Some("user".into()),
-            pid: 4242,
-            session_id: Some("abc-123".into()),
-            session_started_at: 1_755_000_000,
-            cwd: Some("/home/you/src".into()),
-            permission_mode: Some("plan".into()),
+            status: super::Text::word(Some("waiting")),
+            status_age: Some(35),
+            zellij: address("work", "1"),
+            name: super::Name::of(Some("work-f8"), Some("user")),
+            pid: crate::proc::LivePid::unchecked(4242),
+            session_id: super::Text::verbatim(Some("abc-123")),
+            session_started_at: Some(1_755_000_000),
+            cwd: super::Text::verbatim(Some("/home/you/src")),
+            permission_mode: super::Text::word(Some("plan")),
         }
+    }
+
+    fn address(session: &str, pane: &str) -> Option<super::Zellij> {
+        super::Zellij::address((Some(session.to_string()), Some(pane.to_string())))
     }
 
     #[test]
@@ -264,49 +209,32 @@ mod tests {
         assert_eq!(value["zellij"], serde_json::Value::Null);
     }
 
-    /// Anything that launches an agent can set `ZELLIJ_SESSION_NAME=` -- a wrapper script, a
-    /// systemd unit -- and a variable that is present carries no address on its own. Luneta
-    /// reads this key to attach, and `:` is a pane of no session.
     #[test]
     fn a_half_of_an_address_with_nothing_in_it_is_a_half_that_is_missing() {
-        let of = |session: &str, pane: &str| {
-            super::Zellij::address((Some(session.to_string()), Some(pane.to_string())))
-        };
-
-        assert_eq!(of("", "1"), None);
-        assert_eq!(of("work", ""), None);
-        assert_eq!(of("", ""), None);
+        assert_eq!(address("", "1"), None);
+        assert_eq!(address("work", ""), None);
+        assert_eq!(address("", ""), None);
         assert_eq!(super::Zellij::address((None, None)), None);
     }
 
     #[test]
     fn a_whole_address_survives() {
-        assert_eq!(
-            super::Zellij::address((Some("work".into()), Some("1".into()))),
-            Some(super::Zellij {
-                session: "work".into(),
-                pane: "1".into()
-            })
-        );
+        let zellij = address("work", "1").expect("an address");
+        assert_eq!(&*zellij.session, "work");
+        assert_eq!(&*zellij.pane, "1");
     }
 
-    /// A session name is an identifier that a person chose, and not a word from a vocabulary.
-    /// Trimming it names a different session, and `zellij attach` then finds nothing.
     #[test]
     fn a_session_name_keeps_the_space_that_is_part_of_it() {
-        assert_eq!(
-            super::Zellij::address((Some(" my work ".into()), Some(" 1 ".into()))),
-            Some(super::Zellij {
-                session: " my work ".into(),
-                pane: " 1 ".into()
-            })
-        );
+        let zellij = address(" my work ", " 1 ").expect("an address");
+        assert_eq!(&*zellij.session, " my work ");
+        assert_eq!(&*zellij.pane, " 1 ");
     }
 
     #[test]
     fn an_agent_whose_address_was_empty_is_one_null_too() {
         let mut agent = agent();
-        agent.zellij = super::Zellij::address((Some(String::new()), Some(String::new())));
+        agent.zellij = address("", "");
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["zellij"], serde_json::Value::Null);
     }
@@ -314,36 +242,68 @@ mod tests {
     #[test]
     fn a_cwd_with_whitespace_needs_no_special_handling() {
         let mut agent = agent();
-        agent.cwd = Some("/home/you/my projects/thing".into());
+        agent.cwd = super::Text::verbatim(Some("/home/you/my projects/thing"));
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["cwd"], "/home/you/my projects/thing");
     }
 
-    /// Claude Code writes `status` as a free string, and a string with nothing in it is not a
-    /// status. It leaves as `null`, which is the absence every consumer already handles.
     #[test]
     fn a_status_with_nothing_in_it_is_absent_and_not_an_empty_word() {
         for raw in ["", " ", "\t", "\n  "] {
-            assert_eq!(super::StatusWord::parse(Some(raw)), None);
+            assert_eq!(super::Text::word(Some(raw)), None);
         }
-        assert_eq!(super::StatusWord::parse(None), None);
+        assert_eq!(super::Text::word(None), None);
 
         let mut agent = agent();
-        agent.status = super::StatusWord::parse(Some("  "));
+        agent.status = super::Text::word(Some("  "));
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["status"], serde_json::Value::Null);
     }
 
-    /// A word is otherwise the word Claude wrote, including one this tool does not know. Only
-    /// the space around it goes.
     #[test]
     fn a_status_word_is_carried_through_verbatim() {
         for raw in ["waiting", "idle", "busy", "shell", "somethingNew"] {
-            let word = super::StatusWord::parse(Some(raw)).expect("a word");
+            let word = super::Text::word(Some(raw)).expect("a word");
             assert_eq!(&*word, raw);
             assert_eq!(serde_json::to_string(&word).unwrap(), format!(r#""{raw}""#));
         }
-        assert_eq!(&*super::StatusWord::parse(Some(" busy ")).unwrap(), "busy");
+        assert_eq!(&*super::Text::word(Some(" busy ")).unwrap(), "busy");
+    }
+
+    #[test]
+    fn a_key_with_nothing_in_it_is_absent_for_all_of_them() {
+        let mut agent = agent();
+        agent.name = super::Name::of(Some(""), Some(""));
+        agent.session_id = super::Text::verbatim(Some(""));
+        agent.cwd = super::Text::verbatim(Some(""));
+        agent.permission_mode = super::Text::word(Some(""));
+
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        for key in [
+            "name",
+            "name_source",
+            "session_id",
+            "cwd",
+            "permission_mode",
+        ] {
+            assert_eq!(value[key], serde_json::Value::Null, "{key}");
+        }
+    }
+
+    #[test]
+    fn a_word_is_trimmed_and_a_name_is_not() {
+        assert_eq!(&*super::Text::word(Some("  plan  ")).unwrap(), "plan");
+        assert_eq!(
+            &*super::Text::verbatim(Some("/home/you/two spaces / ")).unwrap(),
+            "/home/you/two spaces / "
+        );
+        assert_eq!(&*super::Text::verbatim(Some(" ")).unwrap(), " ");
+    }
+
+    #[test]
+    fn a_narrowed_value_is_the_same_on_the_wire() {
+        let json = serde_json::to_string(&super::Text::verbatim(Some("work-f8"))).unwrap();
+        assert_eq!(json, r#""work-f8""#);
     }
 
     #[test]
@@ -355,37 +315,52 @@ mod tests {
             serde_json::from_str(r#"{"startedAt":1754000000000,"statusUpdatedAt":1755000002000}"#)
                 .unwrap();
 
-        // Identical from `status_age` alone -- the only thing a consumer had before this key.
         assert_eq!(
             super::status_age_secs(1_755_000_012, newborn.status_set_at()),
             super::status_age_secs(1_755_000_012, finished.status_set_at())
         );
 
-        // Separable once the launch time is carried too.
-        assert_eq!(super::epoch_secs(newborn.started_at), 1_755_000_000);
-        assert_eq!(super::epoch_secs(finished.started_at), 1_754_000_000);
+        assert_eq!(super::epoch_secs(newborn.started_at), Some(1_755_000_000));
+        assert_eq!(super::epoch_secs(finished.started_at), Some(1_754_000_000));
     }
 
     #[test]
-    fn an_undated_session_start_is_zero_not_now() {
-        assert_eq!(super::epoch_secs(None), 0);
-        assert_eq!(super::epoch_secs(Some(-1)), 0);
-        assert_eq!(super::epoch_secs(Some(1_755_000_000_999)), 1_755_000_000);
+    fn an_undated_session_start_is_absent_and_not_now() {
+        assert_eq!(super::epoch_secs(None), None);
+        assert_eq!(super::epoch_secs(Some(-1)), None);
+        assert_eq!(
+            super::epoch_secs(Some(1_755_000_000_999)),
+            Some(1_755_000_000)
+        );
     }
 
     #[test]
     fn the_status_age_is_whole_seconds_since_the_status_was_set() {
-        assert_eq!(super::status_age_secs(1_000, Some(940_500)), 59);
+        assert_eq!(super::status_age_secs(1_000, Some(940_500)), Some(59));
     }
 
     #[test]
     fn the_status_age_clamps_a_future_timestamp_to_zero() {
-        assert_eq!(super::status_age_secs(1_000, Some(9_999_000)), 0);
+        assert_eq!(super::status_age_secs(1_000, Some(9_999_000)), Some(0));
     }
 
     #[test]
-    fn the_status_age_of_an_undated_status_is_zero_not_the_epoch() {
-        assert_eq!(super::status_age_secs(1_755_000_000, None), 0);
+    fn an_undated_status_and_a_status_of_this_second_are_not_the_same_age() {
+        assert_eq!(super::status_age_secs(1_755_000_000, None), None);
+        assert_eq!(
+            super::status_age_secs(1_755_000_000, Some(1_755_000_000_000)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn an_unknown_timestamp_is_zero_on_the_wire() {
+        let mut agent = agent();
+        agent.status_age = None;
+        agent.session_started_at = None;
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["status_age"], 0);
+        assert_eq!(value["session_started_at"], 0);
     }
 
     #[test]
@@ -421,8 +396,6 @@ mod tests {
         assert!(file.agent(0).is_none());
     }
 
-    /// The pid of a file from a container, or from another machine on a shared home, is a name
-    /// in a namespace that is not this one. It is never looked up here.
     #[test]
     fn a_pid_from_another_domain_is_not_local() {
         assert!(!super::is_local_domain(
@@ -437,8 +410,6 @@ mod tests {
         assert!(super::is_local_domain(Some(domain), Some(domain)));
     }
 
-    /// The state before the key existed. Rejecting these files hides every agent of an older
-    /// Claude Code, which is worse than the collision the key guards against.
     #[test]
     fn a_file_without_a_domain_is_accepted() {
         assert!(super::is_local_domain(None, Some("linux:0123:pid:[1]")));
@@ -447,16 +418,31 @@ mod tests {
         assert!(file.is_local());
     }
 
-    /// A build sandbox without an `/etc/machine-id` is such a machine, and every agent of a
-    /// person who runs the tool there would go away.
     #[test]
     fn a_machine_that_cannot_say_its_domain_accepts_every_file() {
         assert!(super::is_local_domain(Some("linux:0123:pid:[1]"), None));
         assert!(super::is_local_domain(None, None));
     }
 
-    /// A `derived` name is the basename of the cwd and a suffix, and a `user` name is a label
-    /// that a person chose. A consumer that shows the cwd anyway needs the two apart.
+    #[test]
+    fn a_source_without_a_name_is_no_name_at_all() {
+        assert_eq!(super::Name::of(None, Some("derived")), None);
+        assert_eq!(super::Name::of(Some(""), Some("derived")), None);
+
+        let mut agent = agent();
+        agent.name = super::Name::of(None, Some("derived"));
+        let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["name"], serde_json::Value::Null);
+        assert_eq!(value["name_source"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_name_without_a_source_is_still_a_name() {
+        let name = super::Name::of(Some("work-f8"), None).expect("a name");
+        assert_eq!(&*name.text, "work-f8");
+        assert_eq!(name.source, None);
+    }
+
     #[test]
     fn the_name_source_is_carried_through_verbatim() {
         for source in [

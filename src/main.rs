@@ -16,7 +16,8 @@ object per agent:
 
   status              what Claude reports, verbatim (busy, idle, waiting, ...),
                       or null if Claude reports none
-  status_age          whole seconds in that status
+  status_age          whole seconds in that status, or 0 if no timestamp
+                      dates it
   zellij              {session, pane}, or null if the agent is not in zellij
   name                Claude's own label for the session
   name_source         who chose the name (user, derived, ...), or null
@@ -54,16 +55,13 @@ Claude derived rather than a person chose. That table has no
 stability rule, and its order is by name. Read the JSON from a program."
 )]
 struct Cli {
-    /// json for a program, text for a person
     #[arg(short, long, value_enum, default_value_t = Format::Json)]
     format: Format,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
 enum Format {
-    /// A JSON array, one object for each agent. The documented format.
     Json,
-    /// A padded table with one header line. For eyes only.
     Text,
 }
 
@@ -73,13 +71,9 @@ fn main() -> std::process::ExitCode {
     match run(cli.format) {
         Ok(output) => match write_stdout(&output) {
             Ok(()) => std::process::ExitCode::SUCCESS,
-            // The reader closed the pipe, which is what `| head` does. The reader has the
-            // data it wants, so this tool did not fail.
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
                 std::process::ExitCode::SUCCESS
             }
-            // All other write errors are real. A full disk during `claude-ps > agents.json`
-            // gives a truncated file, and the caller must hear about it.
             Err(error) => {
                 eprintln!("claude-ps: could not write to stdout: {error}");
                 std::process::ExitCode::FAILURE
@@ -92,13 +86,6 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Write the document to stdout, then flush it.
-///
-/// One call for the full document, so a consumer that reads this on a timer sees all of it or
-/// none of it.
-///
-/// The flush is explicit. `Stdout` is line buffered, so a write can report success and the
-/// flush that follows can still fail. The runtime flushes at exit and discards that error.
 fn write_stdout(output: &str) -> std::io::Result<()> {
     let mut stdout = std::io::stdout();
     stdout.write_all(output.as_bytes())?;
@@ -117,13 +104,10 @@ fn run(format: Format) -> Result<String, String> {
     let home = home()?;
     let mut agents = collect(&sessions_dir(&home), now_secs);
 
-    // A stable order, so that two runs give a small diff. The pid is unique and does not
-    // change while the agent runs.
     agents.sort_by_key(|agent| agent.pid);
 
     match format {
         Format::Json => {
-            // One key per line, so two runs one second apart give a small diff.
             let mut out = serde_json::to_string_pretty(&agents)
                 .map_err(|error| format!("could not serialise the agent list: {error}"))?;
             out.push('\n');
@@ -143,10 +127,6 @@ fn sessions_dir(home: &str) -> std::path::PathBuf {
         .join("sessions")
 }
 
-/// All readable session files that have a live agent.
-///
-/// A file that this tool cannot read or parse is skipped without a message. Claude Code writes
-/// to this directory while this tool reads it, so an incomplete file is a normal event.
 fn collect(dir: &std::path::PathBuf, now_secs: i64) -> Vec<agent::Agent> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

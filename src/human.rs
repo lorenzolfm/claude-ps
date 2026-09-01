@@ -1,12 +1,3 @@
-//! The same agents, as a table for a person.
-//!
-//! This format is for eyes only. It has no stability rule: a column can move, and a value can
-//! become shorter. A consumer reads the JSON.
-
-/// The agents as a table between rules, or `no agents` if the list is empty.
-///
-/// The order is by name and then by pid, and not the pid order of the JSON. The JSON order is
-/// for a small diff. A person looks for a name.
 pub fn table(agents: &[crate::agent::Agent], now_secs: i64, home: &str) -> String {
     if agents.is_empty() {
         return "no agents\n".to_string();
@@ -22,7 +13,6 @@ pub fn table(agents: &[crate::agent::Agent], now_secs: i64, home: &str) -> Strin
     render(&HEADER.map(str::to_string), &rows)
 }
 
-/// One cell for each column, in the order of [`HEADER`].
 type Row = [String; COLUMNS];
 
 const COLUMNS: usize = 8;
@@ -31,15 +21,13 @@ const HEADER: [&str; COLUMNS] = [
     "NAME", "STATUS", "AGE", "ELAPSED", "MODE", "CWD", "PID", "ZELLIJ",
 ];
 
-/// The columns that hold a number or a duration. They are aligned to the right, so that the
-/// digits of one column are above each other and two agents compare by eye.
 const RIGHT_ALIGNED: [bool; COLUMNS] = [false, false, true, true, false, false, true, false];
 
 fn row(agent: &crate::agent::Agent, now_secs: i64, home: &str) -> Row {
     [
         name(agent),
         text(agent.status.as_deref()),
-        duration(agent.status_age),
+        agent.status_age.map_or_else(missing, duration),
         elapsed(agent.session_started_at, now_secs),
         text(agent.permission_mode.as_deref()),
         agent
@@ -48,31 +36,23 @@ fn row(agent: &crate::agent::Agent, now_secs: i64, home: &str) -> Row {
             .map_or_else(missing, |cwd| tilde(cwd, home)),
         agent.pid.to_string(),
         agent.zellij.as_ref().map_or_else(missing, |zellij| {
-            format!("{}:{}", zellij.session, zellij.pane)
+            format!("{}:{}", &*zellij.session, &*zellij.pane)
         }),
     ]
 }
 
-/// The mark for a value that the session file does not have. An empty cell reads as a column
-/// that ended, and this tool prints the missing value of every key.
 fn missing() -> String {
     "-".to_string()
 }
 
-/// The name, and a `~` after a name that Claude derived rather than a person chose.
-///
-/// This table prints the cwd on every line, and a derived name is the basename of that cwd and
-/// a suffix. The mark says which names carry something the cwd does not.
-///
-/// Only `user` and `peer` are a chosen name. Every other source, the ones this tool does not
-/// know included, is machinery.
 fn name(agent: &crate::agent::Agent) -> String {
-    let Some(name) = agent.name.as_deref() else {
+    let Some(name) = agent.name.as_ref() else {
         return missing();
     };
-    match agent.name_source.as_deref() {
-        None | Some("user" | "peer") => name.to_string(),
-        Some(_) => format!("{name}~"),
+    let text = &*name.text;
+    match name.source.as_deref() {
+        None | Some("user" | "peer") => text.to_string(),
+        Some(_) => format!("{text}~"),
     }
 }
 
@@ -80,10 +60,6 @@ fn text(value: Option<&str>) -> String {
     value.map_or_else(missing, str::to_string)
 }
 
-/// The header between two rules, the rows, and a rule below, in the style of `tokei`.
-///
-/// Each column is as wide as its widest cell, the header included. The rules are as wide as the
-/// full table, so the eye finds the right edge of the last column.
 fn render(header: &Row, rows: &[Row]) -> String {
     let mut widths = [0usize; COLUMNS];
     for row in std::iter::once(header).chain(rows) {
@@ -92,7 +68,6 @@ fn render(header: &Row, rows: &[Row]) -> String {
         }
     }
 
-    // One space before the first column, two between the columns.
     let rule = "=".repeat(1 + widths.iter().sum::<usize>() + 2 * (COLUMNS - 1));
 
     let mut out = String::new();
@@ -109,8 +84,6 @@ fn render(header: &Row, rows: &[Row]) -> String {
     out
 }
 
-/// One line of cells. The last column carries no padding to its right, so a long `zellij` name
-/// adds no trailing spaces.
 fn line(row: &Row, widths: &[usize; COLUMNS]) -> String {
     let mut out = String::from(" ");
     for (column, cell) in row.iter().enumerate() {
@@ -132,10 +105,6 @@ fn line(row: &Row, widths: &[usize; COLUMNS]) -> String {
     out
 }
 
-/// The home directory as `~`, because the same prefix on every line carries no information.
-///
-/// Only an exact match of a full path component. A home of `/home/you` does not shorten
-/// `/home/younger`.
 fn tilde(path: &str, home: &str) -> String {
     if home.is_empty() {
         return path.to_string();
@@ -152,22 +121,14 @@ fn tilde(path: &str, home: &str) -> String {
     }
 }
 
-/// How long the session runs, from a start in epoch seconds.
-///
-/// A start of `0` is the unknown start of the JSON, and it prints as the missing value. A clock
-/// that moved back gives a start in the future, which prints as `0s` and not as a large number.
-fn elapsed(started_at: u64, now_secs: i64) -> String {
-    if started_at == 0 {
+fn elapsed(started_at: Option<u64>, now_secs: i64) -> String {
+    let Some(started_at) = started_at else {
         return missing();
-    }
+    };
     let now = u64::try_from(now_secs).unwrap_or(0);
     duration(now.saturating_sub(started_at))
 }
 
-/// Whole seconds as the two largest units that are not zero, for example `2h 5m`.
-///
-/// Two units, because the second unit says if the first one is about to change, and a third unit
-/// is noise at that scale.
 fn duration(secs: u64) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
@@ -191,20 +152,20 @@ fn duration(secs: u64) -> String {
 mod tests {
     fn agent(name: &str, pid: u32) -> crate::agent::Agent {
         crate::agent::Agent {
-            status: crate::agent::StatusWord::parse(Some("waiting")),
-            status_age: 35,
-            zellij: Some(crate::agent::Zellij {
-                session: "work".into(),
-                pane: "1".into(),
-            }),
-            name: Some(name.into()),
-            name_source: Some("user".into()),
-            pid,
-            session_id: Some("abc-123".into()),
-            session_started_at: 1_755_000_000,
-            cwd: Some("/home/you/src".into()),
+            status: crate::agent::Text::word(Some("waiting")),
+            status_age: Some(35),
+            zellij: address("work", "1"),
+            name: crate::agent::Name::of(Some(name), Some("user")),
+            pid: crate::proc::LivePid::unchecked(pid),
+            session_id: crate::agent::Text::verbatim(Some("abc-123")),
+            session_started_at: Some(1_755_000_000),
+            cwd: crate::agent::Text::verbatim(Some("/home/you/src")),
             permission_mode: None,
         }
+    }
+
+    fn address(session: &str, pane: &str) -> Option<crate::agent::Zellij> {
+        crate::agent::Zellij::address((Some(session.to_string()), Some(pane.to_string())))
     }
 
     #[test]
@@ -262,34 +223,31 @@ mod tests {
         one.name = None;
         one.zellij = None;
         one.cwd = None;
-        one.session_started_at = 0;
+        one.status_age = None;
+        one.session_started_at = None;
         one.permission_mode = None;
         let table = super::table(&[one], 1_755_000_100, "/home/you");
         assert_eq!(
             table.lines().nth(3).unwrap(),
-            " -     -       35s        -  -     -      1  -"
+            " -     -         -        -  -     -      1  -"
         );
     }
 
-    /// A bare `:` in this column is what a person reports as the bug. It is a pane of no
-    /// session, and the address it came from is no address at all.
     #[test]
     fn an_address_with_nothing_in_it_is_a_dash_and_not_a_bare_colon() {
         let mut one = agent("x", 1);
-        one.zellij = crate::agent::Zellij::address((Some(String::new()), Some(String::new())));
+        one.zellij = address("", "");
         let table = super::table(&[one], 1_755_000_100, "/home/you");
         let row = table.lines().nth(3).unwrap();
         assert!(row.ends_with(" -"), "{row}");
         assert!(!row.contains(':'), "{row}");
     }
 
-    /// The table prints the cwd on every line, so a derived name repeats it. Only a name that
-    /// a person or a peer chose stands without the mark.
     #[test]
     fn a_derived_name_carries_a_mark_and_a_chosen_name_does_not() {
         let marked = |source: Option<&str>| {
             let mut one = agent("work-f8", 1);
-            one.name_source = source.map(str::to_string);
+            one.name = crate::agent::Name::of(Some("work-f8"), source);
             super::name(&one)
         };
 
@@ -307,15 +265,32 @@ mod tests {
     #[test]
     fn an_agent_without_a_name_is_a_dash_and_never_a_lone_mark() {
         let mut one = agent("x", 1);
-        one.name = None;
-        one.name_source = Some("derived".into());
+        one.name = crate::agent::Name::of(None, Some("derived"));
         assert_eq!(super::name(&one), "-");
+    }
+
+    #[test]
+    fn a_name_with_nothing_in_it_is_the_same_dash() {
+        let mut one = agent("x", 1);
+        one.name = crate::agent::Name::of(Some(""), Some("derived"));
+        assert_eq!(super::name(&one), "-");
+    }
+
+    #[test]
+    fn a_cwd_with_nothing_in_it_is_a_dash_and_not_a_blank_cell() {
+        let mut one = agent("x", 1);
+        one.cwd = crate::agent::Text::verbatim(Some(""));
+        let table = super::table(&[one], 1_755_000_100, "/home/you");
+        assert_eq!(
+            table.lines().nth(3).unwrap(),
+            " x     waiting  35s   1m 40s  -     -      1  work:1"
+        );
     }
 
     #[test]
     fn the_permission_mode_has_a_column() {
         let mut one = agent("x", 1);
-        one.permission_mode = Some("bypassPermissions".into());
+        one.permission_mode = crate::agent::Text::word(Some("bypassPermissions"));
         let table = super::table(&[one], 1_755_000_100, "/home/you");
         assert!(table.contains("MODE"), "{table}");
         assert!(table.contains("bypassPermissions"), "{table}");
@@ -351,11 +326,22 @@ mod tests {
 
     #[test]
     fn an_unknown_session_start_is_a_dash_and_not_57_years() {
-        assert_eq!(super::elapsed(0, 1_755_000_000), "-");
+        assert_eq!(super::elapsed(None, 1_755_000_000), "-");
     }
 
     #[test]
     fn a_session_start_in_the_future_is_zero_and_not_a_large_number() {
-        assert_eq!(super::elapsed(1_755_000_100, 1_755_000_000), "0s");
+        assert_eq!(super::elapsed(Some(1_755_000_100), 1_755_000_000), "0s");
+    }
+
+    #[test]
+    fn an_undated_status_is_a_dash_and_not_a_fresh_zero() {
+        let mut undated = agent("x", 1);
+        undated.status_age = None;
+        let table = super::table(&[undated], 1_755_000_100, "/home/you");
+        assert_eq!(
+            table.lines().nth(3).unwrap(),
+            " x     waiting    -   1m 40s  -     ~/src    1  work:1"
+        );
     }
 }
