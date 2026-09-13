@@ -1,3 +1,11 @@
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as os;
+
+#[cfg(not(target_os = "linux"))]
+compile_error!("claude-ps needs a process backend for this operating system");
+
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(transparent)]
 pub struct LivePid(u32);
@@ -16,30 +24,13 @@ impl std::fmt::Display for LivePid {
 }
 
 pub fn live_pid(pid: u32, recorded_start: &str) -> Option<LivePid> {
-    (start_time(pid)? == recorded_start).then_some(LivePid(pid))
-}
-
-fn proc_path(pid: u32, leaf: &str) -> std::path::PathBuf {
-    let mut path = std::path::PathBuf::from("/proc");
-    path.push(pid.to_string());
-    path.push(leaf);
-    path
-}
-
-fn start_time(pid: u32) -> Option<String> {
-    let stat = std::fs::read_to_string(proc_path(pid, "stat")).ok()?;
-    parse_start_time(&stat).map(str::to_owned)
-}
-
-pub fn parse_start_time(stat: &str) -> Option<&str> {
-    let close = stat.rfind(')')?;
-    stat[close + 1..].split_whitespace().nth(19)
+    (os::start_time(pid)? == recorded_start).then_some(LivePid(pid))
 }
 
 pub fn zellij_of(pid: LivePid) -> (Option<String>, Option<String>) {
-    match std::fs::read(proc_path(pid.0, "environ")) {
-        Ok(raw) => parse_environ(&raw),
-        Err(_) => (None, None),
+    match os::environ(pid.0) {
+        Some(raw) => parse_environ(&raw),
+        None => (None, None),
     }
 }
 
@@ -63,25 +54,11 @@ pub fn parse_environ(raw: &[u8]) -> (Option<String>, Option<String>) {
 
 pub fn local_pid_domain() -> Option<&'static str> {
     static DOMAIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    DOMAIN.get_or_init(read_pid_domain).as_deref()
-}
-
-fn read_pid_domain() -> Option<String> {
-    let machine = machine_id()?;
-    let namespace = std::fs::read_link("/proc/self/ns/pid").ok()?;
-    Some(format!("linux:{machine}:{}", namespace.to_string_lossy()))
-}
-
-fn machine_id() -> Option<String> {
-    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
-        .into_iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
-        .map(|id| id.trim().to_owned())
-        .filter(|id| !id.is_empty())
+    DOMAIN.get_or_init(os::pid_domain).as_deref()
 }
 
 pub fn permission_mode(pid: LivePid) -> Option<String> {
-    let raw = std::fs::read(proc_path(pid.0, "cmdline")).ok()?;
+    let raw = os::cmdline(pid.0)?;
     parse_permission_mode(&raw)
 }
 
@@ -112,8 +89,6 @@ pub fn parse_permission_mode(raw: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    const FIELDS_3_TO_21: &str = "R 1 1 1 0 -1 4194304 328 0 0 0 0 0 0 0 20 0 1 0";
-
     #[test]
     fn a_checked_pid_is_a_bare_number() {
         let pid = super::LivePid::unchecked(4242);
@@ -123,29 +98,9 @@ mod tests {
 
     #[test]
     fn a_pid_is_live_only_when_the_start_time_agrees() {
-        let Some(actual) = super::start_time(std::process::id()) else {
-            return;
-        };
+        let actual = super::os::start_time(std::process::id()).unwrap();
         assert!(super::live_pid(std::process::id(), &actual).is_some());
         assert!(super::live_pid(std::process::id(), "0").is_none());
-    }
-
-    #[test]
-    fn start_time_is_field_22() {
-        let stat = format!("3520542 (cat) {FIELDS_3_TO_21} 41288167 17489920 1165");
-        assert_eq!(super::parse_start_time(&stat), Some("41288167"));
-    }
-
-    #[test]
-    fn start_time_survives_parens_and_spaces_in_comm() {
-        let stat = format!("1 ((sd pam)) {FIELDS_3_TO_21} 555 17489920 1165");
-        assert_eq!(super::parse_start_time(&stat), Some("555"));
-    }
-
-    #[test]
-    fn start_time_rejects_a_truncated_line() {
-        assert_eq!(super::parse_start_time("42 (claude) S 0 0"), None);
-        assert_eq!(super::parse_start_time("no parens here"), None);
     }
 
     #[test]
@@ -291,15 +246,6 @@ mod tests {
             .as_deref(),
             Some("acceptEdits")
         );
-    }
-
-    #[test]
-    fn the_local_pid_domain_names_this_machine_and_this_namespace() {
-        let Some(domain) = super::local_pid_domain() else {
-            return;
-        };
-        assert!(domain.starts_with("linux:"), "{domain}");
-        assert!(domain.contains(":pid:["), "{domain}");
     }
 
     #[test]
