@@ -15,14 +15,22 @@ concurrency:
 
 jobs:
   gate:
-    name: ${{ matrix.gate }}
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.gate }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      # One job for each derivation, so the runners work in parallel. A single
-      # `nix flake check` puts every gate behind one log and one runner.
+      # One job for each derivation on each OS, so the runners work in
+      # parallel. A single `nix flake check` puts every gate behind one log and
+      # one runner. src/proc has one backend for each OS, and each backend is
+      # only exercised on its own kernel: ubuntu is x86_64-linux and macos-15
+      # is aarch64-darwin.
       matrix:
+        os:
+          [
+            ubuntu-24.04,
+            macos-15,
+          ]
         gate:
           [
             claude-ps,
