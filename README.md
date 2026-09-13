@@ -30,9 +30,10 @@ nix profile install github:lorenzolfm/claude-ps
 
 ## Requirements
 
-Linux only. `claude-ps` reads `/proc/<pid>/environ`, `/proc/<pid>/stat`, and
-`/proc/<pid>/cmdline`.
-There is no procfs on darwin, so the flake does not build for darwin.
+Linux or macOS. On Linux, `claude-ps` reads `/proc/<pid>/stat`,
+`/proc/<pid>/environ` and `/proc/<pid>/cmdline`. On macOS it runs
+`ps -o lstart=` for the start time, as Claude Code does, and reads the arguments
+and the environment with the `KERN_PROCARGS2` sysctl.
 
 ## Output
 
