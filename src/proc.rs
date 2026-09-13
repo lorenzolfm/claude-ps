@@ -3,7 +3,12 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux as os;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod darwin;
+#[cfg(target_os = "macos")]
+use darwin as os;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("claude-ps needs a process backend for this operating system");
 
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
