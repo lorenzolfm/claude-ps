@@ -16,13 +16,16 @@
     ...
   }:
     flake-parts.lib.mkFlake {inherit inputs;} {
-      # Linux only, unlike the other repos here. The join this tool performs reads
-      # /proc/<pid>/environ and /proc/<pid>/stat, and there is no procfs on darwin. It
-      # would compile there and then report no agents at all, which is worse than not
-      # being offered.
+      # The binary is Linux only. The join this tool performs reads
+      # /proc/<pid>/environ and /proc/<pid>/stat, and there is no procfs on
+      # darwin. It would compile there and then report no agents at all, which
+      # is worse than not being offered. The dev shell and the gates that do
+      # not run the binary work anywhere, so darwin is listed and the package
+      # is withheld below.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
       ];
 
       perSystem = {
@@ -80,26 +83,26 @@
 
         # One derivation for each gate. CI builds them in parallel, and
         # `nix flake check` runs all of them.
-        gates = {
-          inherit claude-ps;
+        gates =
+          pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {inherit claude-ps;}
+          // {
+            # Each gate is a separate derivation. A lint failure therefore stops
+            # CI, but it does not stop a user who only wants to build the crate.
+            claude-ps-clippy = craneLib.cargoClippy (commonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+              });
 
-          # Each gate is a separate derivation. A lint failure therefore stops
-          # CI, but it does not stop a user who only wants to build the crate.
-          claude-ps-clippy = craneLib.cargoClippy (commonArgs
-            // {
-              inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-            });
+            claude-ps-test = craneLib.cargoNextest (commonArgs
+              // {
+                inherit cargoArtifacts;
+                partitions = 1;
+                partitionType = "count";
+              });
 
-          claude-ps-test = craneLib.cargoNextest (commonArgs
-            // {
-              inherit cargoArtifacts;
-              partitions = 1;
-              partitionType = "count";
-            });
-
-          claude-ps-fmt = craneLib.cargoFmt {inherit src;};
-        };
+            claude-ps-fmt = craneLib.cargoFmt {inherit src;};
+          };
       in {
         _module.args.pkgs = import nixpkgs {
           inherit system;
@@ -112,13 +115,15 @@
         # `nix build .#<gate>`.
         packages =
           gates
-          // {
+          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             default = claude-ps;
           };
 
-        apps.default = {
-          type = "app";
-          program = "${pkgs.lib.getExe claude-ps}";
+        apps = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          default = {
+            type = "app";
+            program = "${pkgs.lib.getExe claude-ps}";
+          };
         };
 
         devShells.default = craneLibDev.devShell {
