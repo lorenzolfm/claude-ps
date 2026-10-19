@@ -51,6 +51,7 @@ and the environment with the `KERN_PROCARGS2` sysctl.
 | `session_started_at` | Epoch seconds when the session started, or `0` if unknown |
 | `cwd` | The working directory of the agent |
 | `permission_mode` | The mode the command line asks for, or `null` |
+| `entrypoint` | How Claude Code says it was started, or `null` |
 
 ```console
 $ claude-ps
@@ -65,7 +66,8 @@ $ claude-ps
     "session_id": "b08aacbc-…",
     "session_started_at": 1755000000,
     "cwd": "/home/you/Projects/work",
-    "permission_mode": null
+    "permission_mode": null,
+    "entrypoint": "cli"
   },
   {
     "status": "busy",
@@ -77,7 +79,8 @@ $ claude-ps
     "session_id": "52b7681e-…",
     "session_started_at": 1755004000,
     "cwd": "/home/you/scratch",
-    "permission_mode": "bypassPermissions"
+    "permission_mode": "bypassPermissions",
+    "entrypoint": "cli"
   }
 ]
 ```
@@ -103,17 +106,18 @@ document. Read the JSON from a program.
 **The status vocabulary is open.** Claude Code adds new values in new releases.
 `claude-ps` passes the status through without a change. Do not compare the
 status against a fixed set of values. A consumer that shows only the values it
-knows hides live agents. `name_source` and `permission_mode` are open in the
-same way.
+knows hides live agents. `name_source`, `permission_mode` and `entrypoint` are
+open in the same way.
 
 **An empty value is an absence.** `claude-ps` never writes `""`. The session
 file belongs to Claude Code, and a release of it can clear a key that carried
 something before. Such a key leaves as `null`, which is the absence a consumer
 already reads. A value that carries something is passed through with no change:
-only the space around a `status`, a `name_source` and a `permission_mode` goes,
-because the space around a word is not part of the word. A `name`, a
-`session_id`, a `cwd`, and both halves of a `zellij` address are verbatim. A
-directory name can end in a space, and a trim names a different directory.
+only the space around a `status`, a `name_source`, a `permission_mode` and an
+`entrypoint` goes, because the space around a word is not part of the word. A
+`name`, a `session_id`, a `cwd`, and both halves of a `zellij` address are
+verbatim. A directory name can end in a space, and a trim names a different
+directory.
 
 **`name_source` says whether the name carries information.** A `derived` name is
 the basename of the `cwd` and a suffix, so a consumer that already shows the
@@ -131,6 +135,14 @@ command line of the agent, which does not change. A person who cycles the mode
 during a session does not move this key, and an agent that was launched with no
 flag reports `null` and not the mode it fell back to. It answers what an agent
 was started with. It does not answer what an agent may do right now.
+
+**`entrypoint` tells the agent a person talks to from one a program runs.**
+Claude Code writes `cli` for an agent started at a prompt, and `sdk-cli` for
+`claude -p`, also for a `claude -p` that an agent runs and that inherits the
+agent's environment. That environment carries the zellij address too, so two
+agents at one address are usually such a pair: the `cli` one is the agent in
+that pane. Claude Code writes other values for its other hosts, and a session
+file from before the key reports `null`.
 
 **`status_age` and `session_started_at` answer different questions.**
 `status_age` is the time in the current status. `session_started_at` is the time

@@ -26,10 +26,12 @@ object per agent:
   session_started_at  epoch seconds when the session started, or 0 if unknown
   cwd                 the working directory of the agent
   permission_mode     the mode the command line asks for, or null
+  entrypoint          how Claude Code says it was started (cli, sdk-cli, ...),
+                      or null
 
 The status vocabulary is open and changes with the version of Claude Code. Do
 not compare the status against a fixed set of values. The same holds for
-name_source and permission_mode.
+name_source, permission_mode and entrypoint.
 
 name_source says whether the name carries information. A derived name is the
 basename of the cwd and a suffix, so a consumer that shows the cwd shows it
@@ -37,6 +39,9 @@ twice. Only user and peer are a name that somebody chose.
 
 permission_mode is the launch of the agent and not the mode it runs under now.
 A command line does not change, and a person cycles the mode during a session.
+
+entrypoint tells the agent a person talks to (cli) from a claude -p (sdk-cli),
+which keeps the zellij address of the agent that runs it.
 
 status_age and session_started_at answer different questions. status_age is the
 time in the current status. session_started_at is the time when the session

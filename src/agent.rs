@@ -12,6 +12,7 @@ pub struct SessionFile {
     pub status_updated_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub started_at: Option<i64>,
+    pub entrypoint: Option<String>,
 }
 
 impl SessionFile {
@@ -45,6 +46,7 @@ impl SessionFile {
             session_started_at: epoch_secs(self.started_at),
             cwd: Text::verbatim(self.cwd.as_deref()),
             permission_mode: Text::word(crate::proc::permission_mode(pid).as_deref()),
+            entrypoint: Text::word(self.entrypoint.as_deref()),
         })
     }
 }
@@ -170,6 +172,7 @@ pub struct Agent {
     pub session_started_at: Option<u64>,
     pub cwd: Option<Text>,
     pub permission_mode: Option<Text>,
+    pub entrypoint: Option<Text>,
 }
 
 #[cfg(test)]
@@ -185,6 +188,7 @@ mod tests {
             session_started_at: Some(1_755_000_000),
             cwd: super::Text::verbatim(Some("/home/you/src")),
             permission_mode: super::Text::word(Some("plan")),
+            entrypoint: super::Text::word(Some("cli")),
         }
     }
 
@@ -197,7 +201,7 @@ mod tests {
         let json = serde_json::to_string(&agent()).unwrap();
         assert_eq!(
             json,
-            r#"{"status":"waiting","status_age":35,"zellij":{"session":"work","pane":"1"},"name":"work-f8","name_source":"user","pid":4242,"session_id":"abc-123","session_started_at":1755000000,"cwd":"/home/you/src","permission_mode":"plan"}"#
+            r#"{"status":"waiting","status_age":35,"zellij":{"session":"work","pane":"1"},"name":"work-f8","name_source":"user","pid":4242,"session_id":"abc-123","session_started_at":1755000000,"cwd":"/home/you/src","permission_mode":"plan","entrypoint":"cli"}"#
         );
     }
 
@@ -277,6 +281,7 @@ mod tests {
         agent.session_id = super::Text::verbatim(Some(""));
         agent.cwd = super::Text::verbatim(Some(""));
         agent.permission_mode = super::Text::word(Some(""));
+        agent.entrypoint = super::Text::word(Some(""));
 
         let value: serde_json::Value = serde_json::to_value(&agent).unwrap();
         for key in [
@@ -285,6 +290,7 @@ mod tests {
             "session_id",
             "cwd",
             "permission_mode",
+            "entrypoint",
         ] {
             assert_eq!(value[key], serde_json::Value::Null, "{key}");
         }
@@ -422,6 +428,19 @@ mod tests {
     fn a_machine_that_cannot_say_its_domain_accepts_every_file() {
         assert!(super::is_local_domain(Some("linux:0123:pid:[1]"), None));
         assert!(super::is_local_domain(None, None));
+    }
+
+    #[test]
+    fn the_entrypoint_is_carried_through_as_a_word() {
+        for entrypoint in ["cli", "sdk-cli", "somethingNew"] {
+            let file: super::SessionFile =
+                serde_json::from_str(&format!(r#"{{"entrypoint":"{entrypoint}"}}"#)).unwrap();
+            let word = super::Text::word(file.entrypoint.as_deref()).expect("a word");
+            assert_eq!(&*word, entrypoint);
+        }
+
+        let file: super::SessionFile = serde_json::from_str(r#"{"pid":1}"#).unwrap();
+        assert_eq!(file.entrypoint, None);
     }
 
     #[test]
