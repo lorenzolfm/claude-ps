@@ -161,6 +161,7 @@ mod tests {
             session_started_at: Some(1_755_000_000),
             cwd: crate::agent::Text::verbatim(Some("/home/you/src")),
             permission_mode: None,
+            entrypoint: None,
         }
     }
 
